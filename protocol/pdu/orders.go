@@ -1173,7 +1173,7 @@ func (s *Secondary) updateCacheBrushOrder(r io.Reader, flags uint16) {
 	cb.cy, _ = core.ReadUInt8(r)
 	cb.style, _ = core.ReadUInt8(r)
 	cb.length, _ = core.ReadUInt8(r)
-	if cb.cx == 8 && cb.cy == 8 {
+	if cb.cx == 8 && cb.cy == 8 && len(cb.data) == 8 {
 		if cb.bpp == 1 {
 			for i := 7; i >= 0; i-- {
 				cb.data[i], _ = core.ReadUInt8(r)
