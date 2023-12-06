@@ -630,7 +630,7 @@ func (d *OpaqueRect) Type() int {
 	return ORDER_TYPE_OPAQUERECT
 }
 func (d *OpaqueRect) Unpack(r io.Reader, present uint32, delta bool) error {
-	glog.Infof("OpaqueRect Order")
+	// glog.Infof("OpaqueRect Order")
 	if present&0x0001 != 0 {
 		readOrderCoord(r, &d.X, delta)
 	}

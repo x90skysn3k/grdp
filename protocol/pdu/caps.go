@@ -2,7 +2,6 @@ package pdu
 
 import (
 	"bytes"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -752,7 +751,7 @@ func readCapability(r io.Reader) (Capability, error) {
 		return nil, err
 	}
 	if err := struc.Unpack(capReader, c); err != nil {
-		glog.Error("Capability unpack error", err, fmt.Sprintf("0x%04x", capType), hex.EncodeToString(capBytes))
+		// glog.Error("Capability unpack error", err, fmt.Sprintf("0x%04x", capType), hex.EncodeToString(capBytes))
 		return nil, err
 	}
 	glog.Debugf("Capability<%s>: %+v", c.Type(), c)
