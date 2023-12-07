@@ -364,7 +364,7 @@ func (c *Client) recvPDU(s []byte) {
 	if r.Len() > 0 {
 		p, err := readPDU(r)
 		if err != nil {
-			glog.Error(err)
+			// glog.Error(err)
 			return
 		}
 		if p.ShareCtrlHeader.PDUType == PDUTYPE_DEACTIVATEALLPDU {

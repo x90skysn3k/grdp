@@ -456,7 +456,7 @@ func readDataPDU(r io.Reader) (*DataPDU, error) {
 
 	default:
 		err = errors.New(fmt.Sprintf("Unknown data pdu type2 0x%02x", header.PDUType2))
-		glog.Error(err)
+		// glog.Error(err)
 		return nil, err
 	}
 
