@@ -7,8 +7,8 @@ import (
 	"io"
 
 	"github.com/lunixbochs/struc"
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/glog"
+	"github.com/x90skysn3k/grdp/core"
+	"github.com/x90skysn3k/grdp/glog"
 )
 
 const (

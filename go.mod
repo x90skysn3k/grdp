@@ -1,4 +1,4 @@
-module github.com/tomatome/grdp
+module github.com/x90skysn3k/grdp
 
 go 1.18
 

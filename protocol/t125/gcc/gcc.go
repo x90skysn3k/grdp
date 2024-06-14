@@ -11,11 +11,11 @@ import (
 	"math/big"
 	"os"
 
-	"github.com/tomatome/grdp/glog"
+	"github.com/x90skysn3k/grdp/glog"
 
 	"github.com/lunixbochs/struc"
-	"github.com/tomatome/grdp/core"
-	"github.com/tomatome/grdp/protocol/t125/per"
+	"github.com/x90skysn3k/grdp/core"
+	"github.com/x90skysn3k/grdp/protocol/t125/per"
 )
 
 var t124_02_98_oid = []byte{0, 0, 20, 124, 0, 1}
