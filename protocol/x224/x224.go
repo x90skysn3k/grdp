@@ -249,6 +249,8 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		message := &ServerConnectionConfirm{}
 		if err := struc.Unpack(bytes.NewReader(s), message); err != nil {
 			glog.Error("ReadServerConnectionConfirm err", err)
+			x.Emit("error", err)
+			x.Close()
 			return
 		}
 		glog.Debugf("message: %+v", *message.ProtocolNeg)
@@ -272,7 +274,10 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 	}
 
 	if x.selectedProtocol == PROTOCOL_HYBRID_EX {
-		glog.Error("NODE_RDP_PROTOCOL_HYBRID_EX_NOT_SUPPORTED")
+		err := fmt.Errorf("NODE_RDP_PROTOCOL_HYBRID_EX_NOT_SUPPORTED")
+		glog.Error(err)
+		x.Emit("error", err)
+		x.Close()
 		return
 	}
 
@@ -289,6 +294,8 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		err := x.transport.(*tpkt.TPKT).StartTLS()
 		if err != nil {
 			glog.Error("start tls failed:", err)
+			x.Emit("error", err)
+			x.Close()
 			return
 		}
 		x.Emit("connect", x.selectedProtocol)
@@ -300,6 +307,8 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		err := x.transport.(*tpkt.TPKT).StartNLA()
 		if err != nil {
 			glog.Error("start NLA failed:", err)
+			x.Emit("error", err)
+			x.Close()
 			return
 		}
 		x.Emit("connect", x.selectedProtocol)
