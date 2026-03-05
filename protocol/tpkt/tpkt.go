@@ -37,32 +37,26 @@ type TPKT struct {
 	fastPathListener core.FastPathListener
 	ntlmSec          *nla.NTLMv2Security
 	ctx              context.Context
-	cancel           context.CancelFunc
 }
 
 func New(s *core.SocketLayer, ntlm *nla.NTLMv2) *TPKT {
-	ctx, cancel := context.WithCancel(context.Background())
 	t := &TPKT{
 		Emitter: *emission.NewEmitter(),
 		Conn:    s,
 		secFlag: 0,
 		ntlm:    ntlm,
-		ctx:     ctx,
-		cancel:  cancel,
+		ctx:     context.Background(),
 	}
-	core.StartReadBytes(ctx, 2, s, t.recvHeader)
+	core.StartReadBytes(t.ctx, 2, s, t.recvHeader)
 	return t
 }
 
-// SetContext replaces the TPKT's context with the provided one. This
-// propagates deadlines to the underlying socket and controls cancellation
-// of all reader goroutines.
+// SetContext updates the TPKT's context for deadline propagation. The existing
+// reader goroutine chain continues running and will pick up the new context
+// on its next read cycle. The deadline from the context is applied to the
+// underlying connection.
 func (t *TPKT) SetContext(ctx context.Context) {
-	// Cancel old context to stop any in-flight readers
-	if t.cancel != nil {
-		t.cancel()
-	}
-	t.ctx, t.cancel = context.WithCancel(ctx)
+	t.ctx = ctx
 	t.Conn.SetContext(ctx)
 }
 
@@ -189,9 +183,6 @@ func (t *TPKT) Write(data []byte) (n int, err error) {
 }
 
 func (t *TPKT) Close() error {
-	if t.cancel != nil {
-		t.cancel()
-	}
 	t.Emitter.Close()
 	return t.Conn.Close()
 }

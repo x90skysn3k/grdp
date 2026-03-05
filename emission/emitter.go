@@ -200,14 +200,19 @@ func (emitter *Emitter) Emit(event interface{}, arguments ...interface{}) *Emitt
 ONCES:
 	// execute onces
 	emitter.Lock()
+	if emitter.closed {
+		emitter.Unlock()
+		return emitter
+	}
 	if listeners, ok = emitter.onces[event]; !ok {
 		emitter.Unlock()
 		return emitter
 	}
+	// Remove the listeners under the lock before executing them
+	remaining := emitter.onces[event][len(listeners):]
+	emitter.onces[event] = remaining
 	emitter.Unlock()
 	emitter.callListeners(listeners, event, arguments...)
-	// clear executed listeners
-	emitter.onces[event] = emitter.onces[event][len(listeners):]
 	return emitter
 }
 
