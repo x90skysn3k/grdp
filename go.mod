@@ -1,6 +1,6 @@
 module github.com/x90skysn3k/grdp
 
-go 1.18
+go 1.21
 
 require (
 	github.com/huin/asn1ber v0.0.0-20120622192748-af09f62e6358

@@ -1,8 +1,10 @@
 package core
 
 import (
+	"context"
 	"crypto/rsa"
 	"math/big"
+	"time"
 
 	"github.com/huin/asn1ber"
 
@@ -15,14 +17,30 @@ import (
 type SocketLayer struct {
 	conn    net.Conn
 	tlsConn *tls.Conn
+	ctx     context.Context
 }
 
 func NewSocketLayer(conn net.Conn) *SocketLayer {
 	l := &SocketLayer{
 		conn:    conn,
 		tlsConn: nil,
+		ctx:     context.Background(),
 	}
 	return l
+}
+
+// SetContext sets a context for deadline propagation. If the context has a
+// deadline, it is applied to the underlying connection immediately.
+func (s *SocketLayer) SetContext(ctx context.Context) {
+	s.ctx = ctx
+	if deadline, ok := ctx.Deadline(); ok {
+		s.conn.SetDeadline(deadline)
+	}
+}
+
+// SetDeadline sets the read and write deadline on the underlying connection.
+func (s *SocketLayer) SetDeadline(t time.Time) error {
+	return s.conn.SetDeadline(t)
 }
 
 func (s *SocketLayer) Read(b []byte) (n int, err error) {

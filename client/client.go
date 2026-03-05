@@ -2,6 +2,7 @@
 package client
 
 import (
+	"context"
 	"log"
 	"os"
 
@@ -20,7 +21,7 @@ const (
 )
 
 type Control interface {
-	Login(host, user, passwd string, width, height int) error
+	Login(ctx context.Context, host, user, passwd string, width, height int) error
 	KeyUp(sc int, name string)
 	KeyDown(sc int, name string)
 	MouseMove(x, y int)
@@ -65,7 +66,13 @@ func NewClient(host, user, passwd string, t int, s *Setting) *Client {
 }
 
 func (c *Client) Login() error {
-	return c.ctl.Login(c.host, c.user, c.passwd, c.setting.Width, c.setting.Height)
+	return c.LoginContext(context.Background())
+}
+
+// LoginContext connects and authenticates using the provided context for
+// timeout and cancellation control.
+func (c *Client) LoginContext(ctx context.Context) error {
+	return c.ctl.Login(ctx, c.host, c.user, c.passwd, c.setting.Width, c.setting.Height)
 }
 
 func (c *Client) KeyUp(sc int, name string) {

@@ -34,6 +34,9 @@ type Emitter struct {
 
 	// Map of event to a slice of listener function's reflect Values.
 	onces map[interface{}][]reflect.Value
+
+	// closed indicates the emitter has been shut down.
+	closed bool
 }
 
 // AddListener appends the listener argument to the event arguments slice
@@ -149,6 +152,17 @@ func (emitter *Emitter) Once(event, listener interface{}) *Emitter {
 	return emitter
 }
 
+// Close shuts down the emitter, clearing all listeners and preventing new
+// events from being dispatched. This stops goroutine leaks from pending
+// listener invocations.
+func (emitter *Emitter) Close() {
+	emitter.Lock()
+	defer emitter.Unlock()
+	emitter.closed = true
+	emitter.events = make(map[interface{}][]reflect.Value)
+	emitter.onces = make(map[interface{}][]reflect.Value)
+}
+
 // Emit attempts to use the reflect package to Call each listener stored
 // in the Emitter's events map with the supplied arguments. Each listener
 // is called within its own go routine. The reflect package will panic if
@@ -164,6 +178,11 @@ func (emitter *Emitter) Emit(event interface{}, arguments ...interface{}) *Emitt
 	// Lock the mutex when reading from the Emitter's
 	// events map.
 	emitter.Lock()
+
+	if emitter.closed {
+		emitter.Unlock()
+		return emitter
+	}
 
 	if listeners, ok = emitter.events[event]; !ok {
 		// If the Emitter does not include the event in its

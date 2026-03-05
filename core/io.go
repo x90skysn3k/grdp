@@ -1,18 +1,26 @@
 package core
 
 import (
+	"context"
 	"encoding/binary"
 	"io"
 )
 
 type ReadBytesComplete func(result []byte, err error)
 
-func StartReadBytes(len int, r io.Reader, cb ReadBytesComplete) {
+// StartReadBytes reads len bytes from r in a goroutine and calls cb with the
+// result. If ctx is cancelled before the read completes, the callback is not
+// invoked, preventing work on a dead connection.
+func StartReadBytes(ctx context.Context, len int, r io.Reader, cb ReadBytesComplete) {
 	b := make([]byte, len)
 	go func() {
 		_, err := io.ReadFull(r, b)
-		//glog.Debug("StartReadBytes Get", n, "Bytes:", hex.EncodeToString(b))
-		cb(b, err)
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			cb(b, err)
+		}
 	}()
 }
 

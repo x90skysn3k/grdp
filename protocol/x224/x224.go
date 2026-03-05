@@ -2,6 +2,7 @@ package x224
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -226,9 +227,17 @@ func (x *X224) SetRequestedProtocol(p uint32) {
 	x.requestedProtocol = p
 }
 
-func (x *X224) Connect() error {
+// Connect initiates the X224 connection negotiation. If ctx is provided,
+// it is propagated to the TPKT layer for deadline and cancellation support.
+func (x *X224) Connect(ctx ...context.Context) error {
 	if x.transport == nil {
 		return errors.New("no transport")
+	}
+	// Propagate context to TPKT if provided
+	if len(ctx) > 0 && ctx[0] != nil {
+		if t, ok := x.transport.(*tpkt.TPKT); ok {
+			t.SetContext(ctx[0])
+		}
 	}
 	cookie := "Cookie: mstshash=test"
 	message := NewClientConnectionRequestPDU([]byte(cookie), x.requestedProtocol)

@@ -1,10 +1,10 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
-	"time"
 
 	"github.com/x90skysn3k/grdp/core"
 	"github.com/x90skysn3k/grdp/protocol/nla"
@@ -44,8 +44,12 @@ func split(user string) (domain string, uname string) {
 	}
 	return
 }
-func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
-	conn, err := net.DialTimeout("tcp", host, 3*time.Second)
+// Login connects to the RDP server and initiates authentication. The context
+// controls the overall timeout and cancellation for the entire operation
+// including TCP dial, TLS handshake, and NLA authentication.
+func (c *RdpClient) Login(ctx context.Context, host, user, pwd string, width, height int) error {
+	dialer := &net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "tcp", host)
 	if err != nil {
 		return fmt.Errorf("[dial err] %v", err)
 	}
@@ -69,7 +73,7 @@ func (c *RdpClient) Login(host, user, pwd string, width, height int) error {
 	//c.x224.SetRequestedProtocol(x224.PROTOCOL_RDP)
 	//c.x224.SetRequestedProtocol(x224.PROTOCOL_SSL)
 
-	err = c.x224.Connect()
+	err = c.x224.Connect(ctx)
 	if err != nil {
 		return fmt.Errorf("[x224 connect err] %v", err)
 	}
