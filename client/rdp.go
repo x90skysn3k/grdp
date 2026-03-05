@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"strings"
 
@@ -16,15 +15,16 @@ import (
 )
 
 type RdpClient struct {
-	tpkt *tpkt.TPKT
-	x224 *x224.X224
-	mcs  *t125.MCSClient
-	sec  *sec.Client
-	pdu  *pdu.Client
+	tpkt    *tpkt.TPKT
+	x224    *x224.X224
+	mcs     *t125.MCSClient
+	sec     *sec.Client
+	pdu     *pdu.Client
+	setting *Setting
 }
 
 func newRdpClient(s *Setting) *RdpClient {
-	return &RdpClient{}
+	return &RdpClient{setting: s}
 }
 
 func bitmapDecompress(bitmap *pdu.BitmapData) []byte {
@@ -44,19 +44,41 @@ func split(user string) (domain string, uname string) {
 	}
 	return
 }
+func (c *RdpClient) dialAndSetup(ctx context.Context, host, user, pwd string) (string, string, error) {
+	dialer := &net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "tcp", host)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", "", NewRDPError(ErrKindTimeout, "dial timed out", err)
+		}
+		return "", "", NewRDPError(ErrKindNetwork, "dial failed", err)
+	}
+
+	domain, user := split(user)
+	sock := core.NewSocketLayer(conn)
+	if c.setting != nil {
+		if c.setting.TLSMinVersion != 0 {
+			sock.TLSMinVersion = c.setting.TLSMinVersion
+		}
+		sock.TLSVerify = c.setting.TLSVerify
+	}
+	c.tpkt = tpkt.New(sock, nla.NewNTLMv2(domain, user, pwd))
+	if c.setting != nil && c.setting.VerifyServer {
+		c.tpkt.VerifyServer = true
+	}
+	c.x224 = x224.New(c.tpkt)
+	return domain, user, nil
+}
+
 // Login connects to the RDP server and initiates authentication. The context
 // controls the overall timeout and cancellation for the entire operation
 // including TCP dial, TLS handshake, and NLA authentication.
 func (c *RdpClient) Login(ctx context.Context, host, user, pwd string, width, height int) error {
-	dialer := &net.Dialer{}
-	conn, err := dialer.DialContext(ctx, "tcp", host)
+	domain, user, err := c.dialAndSetup(ctx, host, user, pwd)
 	if err != nil {
-		return fmt.Errorf("[dial err] %v", err)
+		return err
 	}
 
-	domain, user := split(user)
-	c.tpkt = tpkt.New(core.NewSocketLayer(conn), nla.NewNTLMv2(domain, user, pwd))
-	c.x224 = x224.New(c.tpkt)
 	c.mcs = t125.NewMCSClient(c.x224)
 	c.sec = sec.NewClient(c.mcs)
 	c.pdu = pdu.NewClient(c.sec)
@@ -70,17 +92,60 @@ func (c *RdpClient) Login(ctx context.Context, host, user, pwd string, width, he
 	c.tpkt.SetFastPathListener(c.sec)
 	c.sec.SetFastPathListener(c.pdu)
 
-	//c.x224.SetRequestedProtocol(x224.PROTOCOL_RDP)
-	//c.x224.SetRequestedProtocol(x224.PROTOCOL_SSL)
+	if c.setting != nil && c.setting.RequestedProtocol != 0 {
+		c.x224.SetRequestedProtocol(c.setting.RequestedProtocol)
+	}
 
 	err = c.x224.Connect(ctx)
 	if err != nil {
-		return fmt.Errorf("[x224 connect err] %v", err)
+		if ctx.Err() != nil {
+			return NewRDPError(ErrKindTimeout, "connection timed out", err)
+		}
+		return NewRDPError(ErrKindProtocol, "x224 connect failed", err)
 	}
 	return nil
 }
+
+// LoginAuthOnly connects and performs NLA authentication only, without setting
+// up the full RDP session (MCS/SEC/PDU). This is significantly faster for
+// credential checking. Requires the server to support NLA (PROTOCOL_HYBRID).
+// Returns nil if authentication succeeds, or an error (check with errors.As
+// for *core.RDPError to get the Kind).
+func (c *RdpClient) LoginAuthOnly(ctx context.Context, host, user, pwd string) error {
+	_, _, err := c.dialAndSetup(ctx, host, user, pwd)
+	if err != nil {
+		return err
+	}
+
+	c.x224.SetRequestedProtocol(x224.PROTOCOL_HYBRID)
+
+	resultCh := make(chan error, 1)
+	c.x224.On("connect", func(proto uint32) {
+		resultCh <- nil
+	})
+	c.x224.On("error", func(e error) {
+		resultCh <- e
+	})
+
+	err = c.x224.Connect(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return NewRDPError(ErrKindTimeout, "connection timed out", err)
+		}
+		return NewRDPError(ErrKindProtocol, "x224 connect failed", err)
+	}
+
+	select {
+	case err := <-resultCh:
+		return err
+	case <-ctx.Done():
+		return NewRDPError(ErrKindTimeout, "auth timed out", ctx.Err())
+	}
+}
 func (c *RdpClient) On(event string, f interface{}) {
-	c.pdu.On(event, f)
+	if c.pdu != nil {
+		c.pdu.On(event, f)
+	}
 }
 func (c *RdpClient) KeyUp(sc int, name string) {
 	p := &pdu.ScancodeKeyEvent{}
@@ -107,7 +172,7 @@ func (c *RdpClient) MouseWheel(scroll, x, y int) {
 	p.PointerFlags |= pdu.PTRFLAGS_WHEEL
 	p.XPos = uint16(x)
 	p.YPos = uint16(y)
-	c.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
+	c.pdu.SendInputEvents(pdu.INPUT_EVENT_MOUSE, []pdu.InputEventsInterface{p})
 }
 
 func (c *RdpClient) MouseUp(button int, x, y int) {

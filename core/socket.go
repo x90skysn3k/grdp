@@ -3,28 +3,27 @@ package core
 import (
 	"context"
 	"crypto/rsa"
-	"math/big"
-	"time"
-
-	"github.com/huin/asn1ber"
-
-	//"crypto/tls"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"net"
-	"github.com/icodeface/tls"
+	"time"
 )
 
 type SocketLayer struct {
-	conn    net.Conn
-	tlsConn *tls.Conn
-	ctx     context.Context
+	conn          net.Conn
+	tlsConn       *tls.Conn
+	ctx           context.Context
+	TLSMinVersion uint16
+	TLSVerify     bool
 }
 
 func NewSocketLayer(conn net.Conn) *SocketLayer {
 	l := &SocketLayer{
-		conn:    conn,
-		tlsConn: nil,
-		ctx:     context.Background(),
+		conn:          conn,
+		tlsConn:       nil,
+		ctx:           context.Background(),
+		TLSMinVersion: tls.VersionTLS12,
 	}
 	return l
 }
@@ -35,6 +34,9 @@ func (s *SocketLayer) SetContext(ctx context.Context) {
 	s.ctx = ctx
 	if deadline, ok := ctx.Deadline(); ok {
 		s.conn.SetDeadline(deadline)
+		if s.tlsConn != nil {
+			s.tlsConn.SetDeadline(deadline)
+		}
 	}
 }
 
@@ -68,25 +70,33 @@ func (s *SocketLayer) Close() error {
 }
 
 func (s *SocketLayer) StartTLS() error {
+	minVer := s.TLSMinVersion
+	if minVer == 0 {
+		minVer = tls.VersionTLS12
+	}
 	config := &tls.Config{
-		InsecureSkipVerify:       true,
-		MinVersion:               tls.VersionTLS10,
-		MaxVersion:               tls.VersionTLS13,
-		PreferServerCipherSuites: true,
+		InsecureSkipVerify: !s.TLSVerify,
+		MinVersion:         minVer,
+		MaxVersion:         tls.VersionTLS13,
 	}
 	s.tlsConn = tls.Client(s.conn, config)
-	return s.tlsConn.Handshake()
-}
-
-type PublicKey struct {
-	N *big.Int `asn1:"explicit,tag:0"` // modulus
-	E int      `asn1:"explicit,tag:1"` // public exponent
+	err := s.tlsConn.Handshake()
+	if err != nil {
+		return err
+	}
+	if deadline, ok := s.ctx.Deadline(); ok {
+		s.tlsConn.SetDeadline(deadline)
+	}
+	return nil
 }
 
 func (s *SocketLayer) TlsPubKey() ([]byte, error) {
 	if s.tlsConn == nil {
 		return nil, errors.New("TLS conn does not exist")
 	}
-	pub := s.tlsConn.ConnectionState().PeerCertificates[0].PublicKey.(*rsa.PublicKey)
-	return asn1ber.Marshal(*pub)
+	pub, ok := s.tlsConn.ConnectionState().PeerCertificates[0].PublicKey.(*rsa.PublicKey)
+	if !ok {
+		return nil, errors.New("server certificate does not contain RSA public key")
+	}
+	return x509.MarshalPKCS1PublicKey(pub), nil
 }
