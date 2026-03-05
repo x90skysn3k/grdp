@@ -264,11 +264,13 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		}
 		glog.Debugf("message: %+v", *message.ProtocolNeg)
 		if message.ProtocolNeg.Type == TYPE_RDP_NEG_FAILURE {
-			glog.Error(fmt.Sprintf("NODE_RDP_PROTOCOL_X224_NEG_FAILURE with code: %d,see https://msdn.microsoft.com/en-us/library/cc240507.aspx",
-				message.ProtocolNeg.Result))
-			//only use Standard RDP Security mechanisms
-			if message.ProtocolNeg.Result == 2 {
-				glog.Info("Only use Standard RDP Security mechanisms, Reconnect with Standard RDP")
+			failErr := fmt.Errorf("protocol negotiation failed with code %d", message.ProtocolNeg.Result)
+			glog.Error(failErr)
+			if message.ProtocolNeg.Result == 2 || message.ProtocolNeg.Result == 5 {
+				// SSL_REQUIRED_BY_SERVER (2) or HYBRID_REQUIRED_BY_SERVER (5)
+				x.Emit("error", &core.RDPError{Kind: core.ErrKindProtocol, Message: "NLA/SSL required by server", Wrapped: failErr})
+			} else {
+				x.Emit("error", &core.RDPError{Kind: core.ErrKindProtocol, Message: "negotiation failed", Wrapped: failErr})
 			}
 			x.Close()
 			return
@@ -303,7 +305,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		err := x.transport.(*tpkt.TPKT).StartTLS()
 		if err != nil {
 			glog.Error("start tls failed:", err)
-			x.Emit("error", err)
+			x.Emit("error", &core.RDPError{Kind: core.ErrKindTLS, Message: "TLS handshake failed", Wrapped: err})
 			x.Close()
 			return
 		}
@@ -316,7 +318,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		err := x.transport.(*tpkt.TPKT).StartNLA()
 		if err != nil {
 			glog.Error("start NLA failed:", err)
-			x.Emit("error", err)
+			x.Emit("error", &core.RDPError{Kind: core.ErrKindAuth, Message: "NLA authentication failed", Wrapped: err})
 			x.Close()
 			return
 		}

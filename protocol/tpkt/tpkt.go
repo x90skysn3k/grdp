@@ -5,12 +5,71 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"io"
 
 	"github.com/x90skysn3k/grdp/core"
 	"github.com/x90skysn3k/grdp/emission"
 	"github.com/x90skysn3k/grdp/glog"
 	"github.com/x90skysn3k/grdp/protocol/nla"
 )
+
+const maxDERFrameSize = 65536
+
+// readDERFrame reads a complete DER-encoded TLV from r. It reads the tag and
+// length prefix first, then reads exactly the number of value bytes indicated.
+func readDERFrame(r io.Reader) ([]byte, error) {
+	// Read tag byte
+	tag := make([]byte, 1)
+	if _, err := io.ReadFull(r, tag); err != nil {
+		return nil, fmt.Errorf("read DER tag: %w", err)
+	}
+
+	// Read first length byte
+	lenBuf := make([]byte, 1)
+	if _, err := io.ReadFull(r, lenBuf); err != nil {
+		return nil, fmt.Errorf("read DER length: %w", err)
+	}
+
+	var totalLen int
+	header := []byte{tag[0], lenBuf[0]}
+
+	if lenBuf[0] < 0x80 {
+		// Short form: length is the byte itself
+		totalLen = int(lenBuf[0])
+	} else if lenBuf[0] == 0x80 {
+		return nil, fmt.Errorf("indefinite DER length not supported")
+	} else {
+		// Long form: low 7 bits tell how many bytes encode the length
+		numLenBytes := int(lenBuf[0] & 0x7f)
+		if numLenBytes > 4 {
+			return nil, fmt.Errorf("DER length too large: %d bytes", numLenBytes)
+		}
+		lenBytes := make([]byte, numLenBytes)
+		if _, err := io.ReadFull(r, lenBytes); err != nil {
+			return nil, fmt.Errorf("read DER length bytes: %w", err)
+		}
+		header = append(header, lenBytes...)
+		for _, b := range lenBytes {
+			totalLen = (totalLen << 8) | int(b)
+		}
+	}
+
+	if totalLen > maxDERFrameSize {
+		return nil, fmt.Errorf("DER frame too large: %d bytes", totalLen)
+	}
+
+	// Read the value
+	value := make([]byte, totalLen)
+	if _, err := io.ReadFull(r, value); err != nil {
+		return nil, fmt.Errorf("read DER value: %w", err)
+	}
+
+	// Return full TLV
+	result := make([]byte, 0, len(header)+totalLen)
+	result = append(result, header...)
+	result = append(result, value...)
+	return result, nil
+}
 
 // take idea from https://github.com/Madnikulin50/gordp
 
@@ -37,6 +96,7 @@ type TPKT struct {
 	fastPathListener core.FastPathListener
 	ntlmSec          *nla.NTLMv2Security
 	ctx              context.Context
+	VerifyServer     bool
 }
 
 func New(s *core.SocketLayer, ntlm *nla.NTLMv2) *TPKT {
@@ -86,14 +146,12 @@ func (t *TPKT) StartNLA() error {
 	if err := t.ctx.Err(); err != nil {
 		return err
 	}
-	resp := make([]byte, 1024)
-	n, err := t.Conn.Read(resp)
+	resp, err := readDERFrame(t.Conn)
 	if err != nil {
-		return fmt.Errorf("read %s", err)
-	} else {
-		glog.Debug("StartNLA Read success")
+		return fmt.Errorf("read NLA challenge: %w", err)
 	}
-	return t.recvChallenge(resp[:n])
+	glog.Debug("StartNLA Read success")
+	return t.recvChallenge(resp)
 }
 
 func (t *TPKT) recvChallenge(data []byte) error {
@@ -131,15 +189,13 @@ func (t *TPKT) recvChallenge(data []byte) error {
 	if err := t.ctx.Err(); err != nil {
 		return err
 	}
-	resp := make([]byte, 1024)
-	n, err := t.Conn.Read(resp)
+	resp, err := readDERFrame(t.Conn)
 	if err != nil {
 		glog.Error("Read:", err)
-		return fmt.Errorf("read %s", err)
-	} else {
-		glog.Debug("recvChallenge Read success")
+		return fmt.Errorf("read NLA pubkey response: %w", err)
 	}
-	return t.recvPubKeyInc(resp[:n])
+	glog.Debug("recvChallenge Read success")
+	return t.recvPubKeyInc(resp)
 }
 
 func (t *TPKT) recvPubKeyInc(data []byte) error {
@@ -153,8 +209,35 @@ func (t *TPKT) recvPubKeyInc(data []byte) error {
 		return err
 	}
 	glog.Trace("PubKeyAuth:", tsreq.PubKeyAuth)
-	//ignore
-	//pubkey := t.ntlmSec.GssDecrypt([]byte(tsreq.PubKeyAuth))
+
+	if t.VerifyServer && len(tsreq.PubKeyAuth) > 0 {
+		serverPubKey := t.ntlmSec.GssDecrypt([]byte(tsreq.PubKeyAuth))
+		origPubKey, pkErr := t.Conn.TlsPubKey()
+		if pkErr != nil {
+			return fmt.Errorf("server verification failed: %w", pkErr)
+		}
+		// Server should return the public key with first byte incremented by 1
+		expected := make([]byte, len(origPubKey))
+		copy(expected, origPubKey)
+		if len(expected) > 0 {
+			expected[0]++
+		}
+		if len(serverPubKey) != len(expected) {
+			return fmt.Errorf("server PubKeyAuth verification failed: length mismatch")
+		}
+		match := true
+		for i := range serverPubKey {
+			if serverPubKey[i] != expected[i] {
+				match = false
+				break
+			}
+		}
+		if !match {
+			return fmt.Errorf("server PubKeyAuth verification failed: possible MITM")
+		}
+		glog.Debug("Server PubKeyAuth verified successfully")
+	}
+
 	domain, username, password := t.ntlm.GetEncodedCredentials()
 	credentials := nla.EncodeDERTCredentials(domain, username, password)
 	authInfo := t.ntlmSec.GssEncrypt(credentials)

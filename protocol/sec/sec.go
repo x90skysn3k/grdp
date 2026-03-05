@@ -2,6 +2,7 @@ package sec
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/rc4"
@@ -239,8 +240,10 @@ type SEC struct {
 	nbEncryptedPacket int
 	nbDecryptedPacket int
 
-	currentDecrytKey  []byte
+	currentDecryptKey  []byte
 	currentEncryptKey []byte
+	initialDecryptKeyRef []byte
+	initialEncryptKeyRef []byte
 
 	//current rc4 tab
 	decryptRc4 *rc4.Cipher
@@ -251,21 +254,9 @@ type SEC struct {
 
 func NewSEC(t core.Transport) *SEC {
 	sec := &SEC{
-		*emission.NewEmitter(),
-		t,
-		NewRDPInfo(),
-		"",
-		nil,
-		nil,
-		false,
-		false,
-		0,
-		0,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
+		Emitter:   *emission.NewEmitter(),
+		transport: t,
+		info:      NewRDPInfo(),
 	}
 
 	t.On("close", func() {
@@ -284,7 +275,7 @@ func (s *SEC) Write(b []byte) (n int, err error) {
 	if !s.enableEncryption {
 		return s.transport.Write(b)
 	}
-	data := s.encrytData(b)
+	data := s.encryptData(b)
 	return s.transport.Write(data)
 }
 
@@ -294,7 +285,7 @@ func (s *SEC) Close() error {
 
 func (s *SEC) sendFlagged(flag uint16, data []byte) (n int, err error) {
 	glog.Trace("sendFlagged:", hex.EncodeToString(data))
-	b := s.encryt(flag, data)
+	b := s.encrypt(flag, data)
 	return s.transport.Write(b)
 }
 
@@ -330,50 +321,111 @@ func macData(macSaltKey, data []byte) []byte {
 
 	return md5Digest.Sum(nil)
 }
+
+// macSaltedData computes a salted MAC per MS-RDPBCGR 5.3.6.1 (SECURE_CHECKSUM).
+// It uses HMAC-MD5 with a sequence number for stronger integrity.
+func macSaltedData(macSaltKey, data []byte, seqNum int) []byte {
+	b := &bytes.Buffer{}
+	core.WriteUInt32LE(uint32(seqNum), b)
+	core.WriteUInt32LE(uint32(len(data)), b)
+
+	h := hmac.New(md5.New, macSaltKey)
+	h.Write(b.Bytes())
+	h.Write(data)
+	return h.Sum(nil)
+}
+
+// updateSessionKey derives a new key from the initial key and the current key
+// per MS-RDPBCGR 5.3.6.
+func updateSessionKey(initialKey, currentKey []byte) ([]byte, error) {
+	sha1Digest := sha1.New()
+	md5Digest := md5.New()
+	tempHash := make([]byte, 0, sha1.Size)
+
+	sha1Digest.Write(initialKey)
+	for i := 0; i < 40; i++ {
+		sha1Digest.Write([]byte{0x36})
+	}
+	sha1Digest.Write(currentKey)
+	for i := 0; i < 40; i++ {
+		sha1Digest.Write([]byte{0x36})
+	}
+	tempHash = sha1Digest.Sum(tempHash)
+
+	md5Digest.Write(initialKey)
+	for i := 0; i < 48; i++ {
+		md5Digest.Write([]byte{0x5c})
+	}
+	md5Digest.Write(tempHash)
+
+	newKey := md5Digest.Sum(nil)
+
+	cipher, err := rc4.NewCipher(newKey[:len(initialKey)])
+	if err != nil {
+		return nil, err
+	}
+	result := make([]byte, len(initialKey))
+	cipher.XORKeyStream(result, newKey[:len(initialKey)])
+	return result, nil
+}
+
 func (s *SEC) readEncryptedPayload(data []byte, checkSum bool) []byte {
 	r := bytes.NewReader(data)
 	sign, _ := core.ReadBytes(8, r)
 	glog.Debug("read sign:", sign)
 	encryptedPayload, _ := core.ReadBytes(r.Len(), r)
 	if s.decryptRc4 == nil {
-		s.decryptRc4, _ = rc4.NewCipher(s.currentDecrytKey)
+		s.decryptRc4, _ = rc4.NewCipher(s.currentDecryptKey)
 	}
 	s.nbDecryptedPacket++
+	if s.nbDecryptedPacket == 4096 && s.initialDecryptKeyRef != nil {
+		newKey, err := updateSessionKey(s.initialDecryptKeyRef, s.currentDecryptKey)
+		if err == nil {
+			s.currentDecryptKey = newKey
+			s.decryptRc4, _ = rc4.NewCipher(s.currentDecryptKey)
+			s.nbDecryptedPacket = 0
+		}
+	}
 	glog.Debug("nbDecryptedPacket:", s.nbDecryptedPacket)
 	plaintext := make([]byte, len(encryptedPayload))
 	s.decryptRc4.XORKeyStream(plaintext, encryptedPayload)
 
 	return plaintext
-
 }
 func (s *SEC) writeEncryptedPayload(data []byte, checkSum bool) []byte {
-	if s.nbEncryptedPacket == 4096 {
-
-	}
-
-	if checkSum {
-		glog.Debug("need checkSum")
-		return []byte{}
+	if s.nbEncryptedPacket == 4096 && s.initialEncryptKeyRef != nil {
+		newKey, err := updateSessionKey(s.initialEncryptKeyRef, s.currentEncryptKey)
+		if err == nil {
+			s.currentEncryptKey = newKey
+			s.encryptRc4, _ = rc4.NewCipher(s.currentEncryptKey)
+			s.nbEncryptedPacket = 0
+		}
 	}
 
 	s.nbEncryptedPacket++
 	glog.Debug("nbEncryptedPacket:", s.nbEncryptedPacket)
 	b := &bytes.Buffer{}
 
-	sign := macData(s.macKey, data)[:8]
+	var sign []byte
+	if checkSum {
+		sign = macSaltedData(s.macKey, data, s.nbEncryptedPacket-1)[:8]
+	} else {
+		sign = macData(s.macKey, data)[:8]
+	}
+
 	if s.encryptRc4 == nil {
 		s.encryptRc4, _ = rc4.NewCipher(s.currentEncryptKey)
 	}
 
-	plaintext := make([]byte, len(data))
-	s.encryptRc4.XORKeyStream(plaintext, data)
+	ciphertext := make([]byte, len(data))
+	s.encryptRc4.XORKeyStream(ciphertext, data)
 	b.Write(sign)
-	b.Write(plaintext)
-	glog.Debug("sign:", hex.EncodeToString(sign), "plaintext:", hex.EncodeToString(plaintext))
+	b.Write(ciphertext)
+	glog.Debug("sign:", hex.EncodeToString(sign), "ciphertext:", hex.EncodeToString(ciphertext))
 	return b.Bytes()
 }
 
-func (s *SEC) encryt(flag uint16, b []byte) []byte {
+func (s *SEC) encrypt(flag uint16, b []byte) []byte {
 	data := b
 	if flag&ENCRYPT != 0 {
 		data = s.writeEncryptedPayload(b, flag&SECURE_CHECKSUM != 0)
@@ -385,7 +437,7 @@ func (s *SEC) encryt(flag uint16, b []byte) []byte {
 
 	return buff.Bytes()
 }
-func (s *SEC) encrytData(b []byte) []byte {
+func (s *SEC) encryptData(b []byte) []byte {
 	if !s.enableEncryption {
 		return b
 	}
@@ -394,10 +446,10 @@ func (s *SEC) encrytData(b []byte) []byte {
 	if s.enableSecureCheckSum {
 		flag |= SECURE_CHECKSUM
 	}
-	return s.encryt(flag, b)
+	return s.encrypt(flag, b)
 }
 
-func (s *SEC) decrytData(b []byte) []byte {
+func (s *SEC) decryptData(b []byte) []byte {
 	if !s.enableEncryption {
 		return b
 	}
@@ -417,7 +469,7 @@ type Client struct {
 	userId    uint16
 	channelId uint16
 	//initialise decrypt and encrypt keys
-	initialDecrytKey  []byte
+	initialDecryptKey  []byte
 	initialEncryptKey []byte
 
 	fastPathListener core.FastPathListener
@@ -665,12 +717,14 @@ func (c *Client) sendClientRandom() {
 	serverRandom := c.ServerSecurityData().ServerRandom
 	glog.Debug("ServerRandom:", hex.EncodeToString(serverRandom))
 
-	c.macKey, c.initialDecrytKey, c.initialEncryptKey = generateKeys(clientRandom,
+	c.macKey, c.initialDecryptKey, c.initialEncryptKey = generateKeys(clientRandom,
 		serverRandom, c.ServerSecurityData().EncryptionMethod)
 
 	//initialize keys
-	c.currentDecrytKey = c.initialDecrytKey
+	c.currentDecryptKey = c.initialDecryptKey
 	c.currentEncryptKey = c.initialEncryptKey
+	c.initialDecryptKeyRef = c.initialDecryptKey
+	c.initialEncryptKeyRef = c.initialEncryptKey
 
 	//verify certificate
 	if !c.ServerSecurityData().ServerCertificate.CertData.Verify() {
@@ -769,7 +823,7 @@ func (c *Client) sendClientNewLicenseRequest(data []byte) {
 	masSecret := masterSecret(preMasterSecret, clientRandom, serverRandom)
 	sessionKeyBlob := masterSecret(masSecret, serverRandom, clientRandom)
 	c.macKey = sessionKeyBlob[:16]
-	c.initialDecrytKey = finalHash(sessionKeyBlob[16:32], clientRandom, serverRandom)
+	c.initialDecryptKey = finalHash(sessionKeyBlob[16:32], clientRandom, serverRandom)
 
 	//format message
 	message := &lic.ClientNewLicenseRequest{}
@@ -821,7 +875,7 @@ func (c *Client) sendClientChallengeResponse(data []byte) {
 	serverEncryptedChallenge := pc.EncryptedPlatformChallenge.BlobData
 	//decrypt server challenge
 	//it should be TEST word in unicode format
-	rc, _ := rc4.NewCipher(c.initialDecrytKey)
+	rc, _ := rc4.NewCipher(c.initialDecryptKey)
 	serverChallenge := make([]byte, 20)
 	rc.XORKeyStream(serverChallenge, serverEncryptedChallenge)
 	//if serverChallenge != "T\x00E\x00S\x00T\x00\x00\x00":
@@ -856,7 +910,7 @@ func (c *Client) sendClientChallengeResponse(data []byte) {
 func (c *Client) recvData(channel string, s []byte) {
 	glog.Trace("sec recvData", hex.EncodeToString(s))
 	glog.Debugf("channel<%s> data len: %d", channel, len(s))
-	data := c.decrytData(s)
+	data := c.decryptData(s)
 	if channel != t125.GLOBAL_CHANNEL_NAME {
 		c.Emit("channel", channel, data)
 		return

@@ -32,12 +32,6 @@ type Control interface {
 	Close()
 }
 
-func init() {
-	glog.SetLevel(glog.INFO)
-	logger := log.New(os.Stdout, "", 0)
-	glog.SetLogger(logger)
-}
-
 type Client struct {
 	host    string
 	user    string
@@ -61,6 +55,7 @@ func NewClient(host, user, passwd string, t int, s *Setting) *Client {
 
 	c.ctl = newRdpClient(s)
 
+	glog.SetLogger(log.New(os.Stdout, "", 0))
 	s.SetLogLevel()
 	return c
 }
@@ -73,6 +68,17 @@ func (c *Client) Login() error {
 // timeout and cancellation control.
 func (c *Client) LoginContext(ctx context.Context) error {
 	return c.ctl.Login(ctx, c.host, c.user, c.passwd, c.setting.Width, c.setting.Height)
+}
+
+// LoginAuthOnly performs NLA authentication only without establishing a full
+// RDP session. This is faster for credential checking (e.g., brute-force tools).
+// Requires the server to support NLA (CredSSP).
+func (c *Client) LoginAuthOnly(ctx context.Context) error {
+	rdp, ok := c.ctl.(*RdpClient)
+	if !ok {
+		return NewRDPError(ErrKindProtocol, "auth-only mode requires RDP transport", nil)
+	}
+	return rdp.LoginAuthOnly(ctx, c.host, c.user, c.passwd)
 }
 
 func (c *Client) KeyUp(sc int, name string) {
@@ -93,6 +99,10 @@ func (c *Client) MouseUp(button, x, y int) {
 func (c *Client) MouseDown(button, x, y int) {
 	c.ctl.MouseDown(button, x, y)
 }
+func (c *Client) Close() {
+	c.ctl.Close()
+}
+
 func (c *Client) OnError(f func(e error)) {
 	c.ctl.On("error", f)
 }
@@ -143,10 +153,14 @@ func Bpp(bp uint16) int {
 }
 
 type Setting struct {
-	Width    int
-	Height   int
-	Protocol string
-	LogLevel glog.LEVEL
+	Width             int
+	Height            int
+	RequestedProtocol uint32
+	LogLevel          glog.LEVEL
+	TLSMinVersion     uint16
+	TLSVerify         bool
+	VerifyServer      bool // Verify server PubKeyAuth in NLA (MITM protection)
+	AuthOnly          bool // Stop after NLA auth; skip MCS/SEC/PDU (fast credential check)
 }
 
 func NewSetting() *Setting {
@@ -160,5 +174,6 @@ func (s *Setting) SetLogLevel() {
 	glog.SetLevel(s.LogLevel)
 }
 
-func (s *Setting) SetRequestedProtocol(p uint32) {}
-func (s *Setting) SetClipboard(c int)            {}
+func (s *Setting) SetRequestedProtocol(p uint32) {
+	s.RequestedProtocol = p
+}
