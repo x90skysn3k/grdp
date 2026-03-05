@@ -1,14 +1,24 @@
-// client_test.go
 package client
 
 import (
 	"fmt"
+	"os"
 	"testing"
 	"time"
 )
 
 func TestClient(t *testing.T) {
-	c := NewClient("192.168.0.132:3389", "administrator", "Jhadmin123", TC_RDP, nil)
+	host := os.Getenv("RDP_TEST_HOST")
+	if host == "" {
+		t.Skip("set RDP_TEST_HOST to run this integration test")
+	}
+	user := os.Getenv("RDP_TEST_USER")
+	pass := os.Getenv("RDP_TEST_PASS")
+	if user == "" || pass == "" {
+		t.Skip("set RDP_TEST_USER and RDP_TEST_PASS to run this integration test")
+	}
+
+	c := NewClient(host, user, pass, TC_RDP, nil)
 	err := c.Login()
 	if err != nil {
 		fmt.Println("Login:", err)
@@ -16,5 +26,5 @@ func TestClient(t *testing.T) {
 	c.OnReady(func() {
 		fmt.Println("ready")
 	})
-	time.Sleep(100 * time.Second)
+	time.Sleep(10 * time.Second)
 }
