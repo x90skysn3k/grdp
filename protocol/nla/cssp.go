@@ -11,11 +11,12 @@ type NegoToken struct {
 }
 
 type TSRequest struct {
-	Version    int         `asn1:"explicit,tag:0"`
-	NegoTokens []NegoToken `asn1:"optional,explicit,tag:1"`
-	AuthInfo   []byte      `asn1:"optional,explicit,tag:2"`
-	PubKeyAuth []byte      `asn1:"optional,explicit,tag:3"`
-	//ErrorCode  int         `asn1:"optional,explicit,tag:4"`
+	Version     int         `asn1:"explicit,tag:0"`
+	NegoTokens  []NegoToken `asn1:"optional,explicit,tag:1"`
+	AuthInfo    []byte      `asn1:"optional,explicit,tag:2"`
+	PubKeyAuth  []byte      `asn1:"optional,explicit,tag:3"`
+	ErrorCode   int         `asn1:"optional,explicit,tag:4"`
+	ClientNonce []byte      `asn1:"optional,explicit,tag:5"`
 }
 
 type TSCredentials struct {
@@ -44,9 +45,9 @@ type TSSmartCardCreds struct {
 	DomainHint string            `asn1:"explicit,tag:3"`
 }
 
-func EncodeDERTRequest(msgs []Message, authInfo []byte, pubKeyAuth []byte) []byte {
+func EncodeDERTRequest(version int, msgs []Message, authInfo, pubKeyAuth, clientNonce []byte) []byte {
 	req := TSRequest{
-		Version: 2,
+		Version: version,
 	}
 
 	if len(msgs) > 0 {
@@ -64,6 +65,10 @@ func EncodeDERTRequest(msgs []Message, authInfo []byte, pubKeyAuth []byte) []byt
 
 	if len(pubKeyAuth) > 0 {
 		req.PubKeyAuth = pubKeyAuth
+	}
+
+	if len(clientNonce) > 0 {
+		req.ClientNonce = clientNonce
 	}
 
 	result, err := asn1.Marshal(req)

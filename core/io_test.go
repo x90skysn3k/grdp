@@ -8,7 +8,7 @@ import (
 
 func TestWriteUInt16LE(t *testing.T) {
 	buff := &bytes.Buffer{}
-	WriteUInt32LE(66538, buff)
+	_, _ = WriteUInt32LE(66538, buff)
 	result := hex.EncodeToString(buff.Bytes())
 	expected := "ea030100"
 	if result != expected {
