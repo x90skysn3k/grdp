@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
-	"crypto/elliptic"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
@@ -113,7 +112,11 @@ func (s *SocketLayer) TlsPubKey() ([]byte, error) {
 	case *rsa.PublicKey:
 		return x509.MarshalPKCS1PublicKey(pub), nil
 	case *ecdsa.PublicKey:
-		return elliptic.Marshal(pub.Curve, pub.X, pub.Y), nil
+		ecdhKey, err := pub.ECDH()
+		if err != nil {
+			return nil, fmt.Errorf("ECDSA to ECDH conversion: %w", err)
+		}
+		return ecdhKey.Bytes(), nil
 	case ed25519.PublicKey:
 		return []byte(pub), nil
 	default:

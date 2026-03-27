@@ -113,7 +113,11 @@ func TestTlsPubKey_ECDSA(t *testing.T) {
 	}
 	cert := selfSignedCert(t, key, &key.PublicKey)
 	got := tlsPubKeyFromCert(t, cert)
-	want := elliptic.Marshal(key.Curve, key.X, key.Y)
+	ecdhKey, err := key.PublicKey.ECDH()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ecdhKey.Bytes()
 
 	if len(got) != len(want) {
 		t.Fatalf("length mismatch: got %d, want %d", len(got), len(want))
