@@ -50,7 +50,7 @@ func tlsPubKeyFromCert(t *testing.T, cert tls.Certificate) []byte {
 	if err != nil {
 		t.Fatal("listen:", err)
 	}
-	defer ln.Close()
+	defer ln.Close() //nolint:errcheck
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -59,7 +59,7 @@ func tlsPubKeyFromCert(t *testing.T, cert tls.Certificate) []byte {
 			errCh <- err
 			return
 		}
-		defer conn.Close()
+		defer conn.Close() //nolint:errcheck
 		tlsConn := conn.(*tls.Conn)
 		errCh <- tlsConn.Handshake()
 	}()
@@ -68,7 +68,7 @@ func tlsPubKeyFromCert(t *testing.T, cert tls.Certificate) []byte {
 	if err != nil {
 		t.Fatal("dial:", err)
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck
 
 	sock := NewSocketLayer(conn)
 	sock.tlsConn = tls.Client(conn, clientConf)
@@ -148,13 +148,13 @@ func TestTlsPubKey_NoTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer ln.Close() //nolint:errcheck
 
 	conn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck
 
 	sock := NewSocketLayer(conn)
 	_, err = sock.TlsPubKey()

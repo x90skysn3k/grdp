@@ -37,9 +37,9 @@ func NewSocketLayer(conn net.Conn) *SocketLayer {
 func (s *SocketLayer) SetContext(ctx context.Context) {
 	s.ctx = ctx
 	if deadline, ok := ctx.Deadline(); ok {
-		s.conn.SetDeadline(deadline)
+		_ = s.conn.SetDeadline(deadline)
 		if s.tlsConn != nil {
-			s.tlsConn.SetDeadline(deadline)
+			_ = s.tlsConn.SetDeadline(deadline)
 		}
 	}
 }
@@ -92,7 +92,7 @@ func (s *SocketLayer) StartTLS() error {
 		return err
 	}
 	if deadline, ok := s.ctx.Deadline(); ok {
-		s.tlsConn.SetDeadline(deadline)
+		_ = s.tlsConn.SetDeadline(deadline)
 	}
 	return nil
 }
