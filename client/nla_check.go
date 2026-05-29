@@ -41,8 +41,11 @@ func FingerprintNLA(ctx context.Context, target string, timeout time.Duration) (
 	}
 	resp := make([]byte, 64)
 	n, err := conn.Read(resp)
-	if err != nil || n < 19 {
+	if err != nil {
 		return NLAUnknown, fmt.Errorf("read: %w", err)
+	}
+	if n < 19 {
+		return NLAUnknown, fmt.Errorf("short read: got %d bytes, want >= 19", n)
 	}
 	// Bytes 11..18 carry the RDPneg response. Byte 11 is type:
 	//   0x02 = RDP_NEG_RSP (server picked one protocol — selectedProtocols at bytes 15..18)
