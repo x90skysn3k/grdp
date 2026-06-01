@@ -159,6 +159,24 @@ func (c *RdpClient) KeyDown(sc int, name string) {
 	c.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
 }
 
+// KeyDownExt sends a key-press event for an extended-set scancode
+// (PS/2 Set 1 keys prefixed with 0xE0: Win, arrow keys, right Ctrl/Alt,
+// numpad Enter, etc.). It sets KBDFLAGS_EXTENDED on the input PDU.
+func (c *RdpClient) KeyDownExt(sc int, name string) {
+	p := &pdu.ScancodeKeyEvent{}
+	p.KeyCode = uint16(sc)
+	p.KeyboardFlags |= pdu.KBDFLAGS_EXTENDED
+	c.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
+}
+
+// KeyUpExt sends a key-release event for an extended-set scancode.
+func (c *RdpClient) KeyUpExt(sc int, name string) {
+	p := &pdu.ScancodeKeyEvent{}
+	p.KeyCode = uint16(sc)
+	p.KeyboardFlags |= pdu.KBDFLAGS_EXTENDED | pdu.KBDFLAGS_RELEASE
+	c.pdu.SendInputEvents(pdu.INPUT_EVENT_SCANCODE, []pdu.InputEventsInterface{p})
+}
+
 func (c *RdpClient) MouseMove(x, y int) {
 	p := &pdu.PointerEvent{}
 	p.PointerFlags |= pdu.PTRFLAGS_MOVE

@@ -146,10 +146,14 @@ func sendTrigger(c *RdpClient, trigger LogonTrigger) {
 			c.KeyUp(scLShift, "shift")
 		}
 	case TriggerWinU:
-		c.KeyDown(scLWin, "lwin")
+		// Left Windows key is an extended-set scancode (PS/2 Set 1 with the
+		// 0xE0 prefix), so it must be sent via KeyDownExt/KeyUpExt which set
+		// KBDFLAGS_EXTENDED. Sending bare 0x5B as a non-extended key causes
+		// the RDP server to interpret it as numpad '0' or similar — not Win.
+		c.KeyDownExt(scLWin, "lwin")
 		c.KeyDown(scU, "u")
 		c.KeyUp(scU, "u")
-		c.KeyUp(scLWin, "lwin")
+		c.KeyUpExt(scLWin, "lwin")
 	}
 }
 
