@@ -346,6 +346,18 @@ func (t *TPKT) recvFastPath(s []byte, err error) {
 		return
 	}
 
+	// The auth-only login flow (LoginAuthOnly) never builds the SEC/PDU
+	// stack, so no FastPath listener is ever registered, yet tpkt.New has
+	// already started this read loop. Servers that push FastPath output
+	// right after the CredSSP handshake would hit a nil interface method
+	// call here and crash the whole process (this goroutine has no
+	// recover). Discard the frame and keep reading instead.
+	if t.fastPathListener == nil {
+		glog.Trace("tpkt recvFastPath: no fast path listener, dropping frame")
+		core.StartReadBytes(t.ctx, 2, t.Conn, t.recvHeader)
+		return
+	}
+
 	t.fastPathListener.RecvFastPath(t.secFlag, s)
 	core.StartReadBytes(t.ctx, 2, t.Conn, t.recvHeader)
 }
