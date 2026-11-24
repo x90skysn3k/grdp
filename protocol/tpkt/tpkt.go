@@ -404,6 +404,16 @@ func (t *TPKT) recvHeader(s []byte, err error) {
 		if t.lastShortLength&0x80 != 0 {
 			core.StartReadBytes(t.ctx, 1, t.Conn, t.recvExtendedFastPathHeader)
 		} else {
+			// A short-length fastpath packet carries the total length in the
+			// second byte; a value below the 3-byte minimum (action + length
+			// + payload) is malformed. Reading lastShortLength-2 for such a
+			// frame used to panic the process ("makeslice: len out of range",
+			// issue x90skysn3k/brutespray#366) — report it instead.
+			if t.lastShortLength < 3 {
+				glog.Error("TPTK recvHeader: malformed fastpath short length", t.lastShortLength)
+				t.Emit("error", fmt.Errorf("tpkt: malformed fastpath short length %d", t.lastShortLength))
+				return
+			}
 			core.StartReadBytes(t.ctx, t.lastShortLength-2, t.Conn, t.recvFastPath)
 		}
 	}
@@ -417,6 +427,13 @@ func (t *TPKT) recvExtendedHeader(s []byte, err error) {
 	r := bytes.NewReader(s)
 	size, _ := core.ReadUint16BE(r)
 	glog.Debug("tpkt wait recvData:", size)
+	// TPKT total length includes its 4-byte header; anything smaller is a
+	// malformed frame and the size-4 read used to panic the process.
+	if size < 4 {
+		glog.Error("TPTK recvExtendedHeader: malformed TPKT length", size)
+		t.Emit("error", fmt.Errorf("tpkt: malformed TPKT length %d", size))
+		return
+	}
 	core.StartReadBytes(t.ctx, int(size-4), t.Conn, t.recvData)
 }
 
@@ -440,12 +457,31 @@ func (t *TPKT) recvExtendedFastPathHeader(s []byte, err error) {
 
 	leftPart := t.lastShortLength & ^0x80
 	packetSize := (leftPart << 8) + int(rightPart)
+	// Extended-length fastpath packets have a 3-byte header; a declared size
+	// below it used to panic the process via the packetSize-3 read.
+	if packetSize < 3 {
+		glog.Error("TPTK recvExtendedFastPathHeader: malformed fastpath length", packetSize)
+		t.Emit("error", fmt.Errorf("tpkt: malformed fastpath length %d", packetSize))
+		return
+	}
 	core.StartReadBytes(t.ctx, packetSize-3, t.Conn, t.recvFastPath)
 }
 
 func (t *TPKT) recvFastPath(s []byte, err error) {
 	glog.Trace("tpkt recvFastPath")
 	if err != nil {
+		return
+	}
+
+	// The auth-only login flow (LoginAuthOnly) never builds the SEC/PDU
+	// stack, so no FastPath listener is ever registered, yet tpkt.New has
+	// already started this read loop. Servers that push FastPath output
+	// right after the CredSSP handshake would hit a nil interface method
+	// call here and crash the whole process (this goroutine has no
+	// recover). Discard the frame and keep reading instead.
+	if t.fastPathListener == nil {
+		glog.Trace("tpkt recvFastPath: no fast path listener, dropping frame")
+		core.StartReadBytes(t.ctx, 2, t.Conn, t.recvHeader)
 		return
 	}
 

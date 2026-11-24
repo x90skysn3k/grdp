@@ -11,9 +11,24 @@ type ReadBytesComplete func(result []byte, err error)
 // StartReadBytes reads len bytes from r in a goroutine and calls cb with the
 // result. If ctx is cancelled before the read completes, the callback is not
 // invoked, preventing work on a dead connection.
+//
+// A negative len (malformed protocol length minus its header overhead)
+// completes with io.ErrUnexpectedEOF instead of reaching make(), which
+// panics with "makeslice: len out of range" on a separate goroutine that
+// callers cannot recover. The callback is still delivered asynchronously
+// from a goroutine with the same ctx cancellation semantics as a real read.
 func StartReadBytes(ctx context.Context, len int, r io.Reader, cb ReadBytesComplete) {
-	b := make([]byte, len)
 	go func() {
+		if len < 0 {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			cb(nil, io.ErrUnexpectedEOF)
+			return
+		}
+		b := make([]byte, len)
 		_, err := io.ReadFull(r, b)
 		select {
 		case <-ctx.Done():
@@ -24,7 +39,17 @@ func StartReadBytes(ctx context.Context, len int, r io.Reader, cb ReadBytesCompl
 	}()
 }
 
+// ReadBytes reads len bytes from r synchronously.
+//
+// A negative len (malformed protocol length minus its header overhead)
+// returns io.ErrUnexpectedEOF like a truncated read instead of panicking in
+// make(). Parsers reach this through untrusted length fields (licensing
+// WMsgSize-4, capability capLen-4, GCC Keylen-8/SignatureBlobLen-8); they
+// run on background emitter goroutines where a panic kills the process.
 func ReadBytes(len int, r io.Reader) ([]byte, error) {
+	if len < 0 {
+		return nil, io.ErrUnexpectedEOF
+	}
 	b := make([]byte, len)
 	length, err := io.ReadFull(r, b)
 	return b[:length], err
