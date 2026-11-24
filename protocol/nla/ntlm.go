@@ -190,6 +190,71 @@ func (m *ChallengeMessage) getTargetInfoTimestamp(data []byte) []byte {
 	return nil
 }
 
+// addMICProvidedFlag returns a copy of the AvPair list with MsvAvFlags set to
+// MIC_PROVIDED (0x02). Works directly on raw bytes to avoid serialization issues.
+// If MsvAvFlags already exists it is updated in place; otherwise a new 8-byte
+// entry is inserted before the terminating MsvAvEOL.
+func addMICProvidedFlag(serverInfo []byte) []byte {
+	const micProvided uint32 = 0x00000002
+
+	// Scan for existing MsvAvFlags or MsvAvEOL
+	for i := 0; i+4 <= len(serverInfo); {
+		avId := binary.LittleEndian.Uint16(serverInfo[i:])
+		avLen := binary.LittleEndian.Uint16(serverInfo[i+2:])
+
+		if avId == MsvAvFlags && avLen >= 4 {
+			// Update existing flags in a copy
+			result := make([]byte, len(serverInfo))
+			copy(result, serverInfo)
+			flags := binary.LittleEndian.Uint32(result[i+4:])
+			flags |= micProvided
+			binary.LittleEndian.PutUint32(result[i+4:], flags)
+			return result
+		}
+
+		if avId == MsvAvEOL {
+			// Insert MsvAvFlags (8 bytes) before EOL
+			flagEntry := make([]byte, 8)
+			binary.LittleEndian.PutUint16(flagEntry[0:], MsvAvFlags)
+			binary.LittleEndian.PutUint16(flagEntry[2:], 4)
+			binary.LittleEndian.PutUint32(flagEntry[4:], micProvided)
+
+			result := make([]byte, 0, len(serverInfo)+8)
+			result = append(result, serverInfo[:i]...)
+			result = append(result, flagEntry...)
+			result = append(result, serverInfo[i:]...) // MsvAvEOL
+			return result
+		}
+
+		i += 4 + int(avLen)
+	}
+	return serverInfo
+}
+
+// addAvPair inserts an AvPair with the given id and value before the
+// terminating MsvAvEOL in the raw AvPair list.
+func addAvPair(avPairs []byte, id uint16, value []byte) []byte {
+	// Find MsvAvEOL
+	for i := 0; i+4 <= len(avPairs); {
+		avId := binary.LittleEndian.Uint16(avPairs[i:])
+		avLen := binary.LittleEndian.Uint16(avPairs[i+2:])
+		if avId == MsvAvEOL {
+			entry := make([]byte, 4+len(value))
+			binary.LittleEndian.PutUint16(entry[0:], id)
+			binary.LittleEndian.PutUint16(entry[2:], uint16(len(value)))
+			copy(entry[4:], value)
+
+			result := make([]byte, 0, len(avPairs)+len(entry))
+			result = append(result, avPairs[:i]...)
+			result = append(result, entry...)
+			result = append(result, avPairs[i:]...) // MsvAvEOL
+			return result
+		}
+		i += 4 + int(avLen)
+	}
+	return avPairs
+}
+
 type AuthenticateMessage struct {
 	Signature                          [8]byte
 	MessageType                        uint32   `struc:"little"`
@@ -308,7 +373,8 @@ func (n *NTLMv2) GetNegotiateMessage() *NegotiateMessage {
 		NTLMSSP_NEGOTIATE_SEAL |
 		NTLMSSP_NEGOTIATE_SIGN |
 		NTLMSSP_REQUEST_TARGET |
-		NTLMSSP_NEGOTIATE_UNICODE
+		NTLMSSP_NEGOTIATE_UNICODE |
+		NTLMSSP_NEGOTIATE_VERSION
 	n.negotiateMessage = negoMsg
 	return n.negotiateMessage
 }
@@ -395,11 +461,23 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 	} else {
 		computeMIC = true
 	}
+
+	// When computing a MIC, the AvPairs in the NTLMv2 blob must include
+	// MsvAvFlags with the MIC_PROVIDED bit set, and MsvAvTargetName with the
+	// SPN (MS-NLMP section 3.1.5.1.2). Without these, Windows 11 24H2+
+	// rejects the authentication silently.
+	responseInfo := serverInfo
+	if computeMIC {
+		responseInfo = addMICProvidedFlag(serverInfo)
+		spn := core.UnicodeEncode("TERMSRV/" + core.UnicodeDecode(serverName))
+		responseInfo = addAvPair(responseInfo, MsvAvTargetName, spn)
+	}
+
 	glog.Infof("serverName=%+v", core.UnicodeDecode(serverName))
 	serverChallenge := challengeMsg.ServerChallenge[:]
 	clientChallenge := core.Random(8)
 	ntChallengeResponse, lmChallengeResponse, SessionBaseKey := n.ComputeResponseV2(
-		n.respKeyNT, n.respKeyLM, serverChallenge, clientChallenge, timestamp, serverInfo)
+		n.respKeyNT, n.respKeyLM, serverChallenge, clientChallenge, timestamp, responseInfo)
 
 	exchangeKey := SessionBaseKey
 	exportedSessionKey := core.Random(16)

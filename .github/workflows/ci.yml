@@ -9,9 +9,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        go-version: ['1.21', '1.22', '1.23']
 
     steps:
       - uses: actions/checkout@v4
@@ -19,13 +16,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: '1.26'
 
       - name: Build
         run: go build ./...
 
       - name: Vet
-        run: go vet ./... || true
+        run: go vet ./...
 
       - name: Test
         run: go test -race -timeout 60s ./...
@@ -38,11 +35,11 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.26'
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          version: v2.11.4
           args: --timeout 5m
-        continue-on-error: true
+          only-new-issues: true
