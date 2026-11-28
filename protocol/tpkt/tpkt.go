@@ -3,6 +3,8 @@ package tpkt
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -16,6 +18,9 @@ import (
 )
 
 const maxDERFrameSize = 65536
+
+// clientVersion is the highest CredSSP version we advertise.
+const clientVersion = 6
 
 // readDERFrame reads a complete DER-encoded TLV from r. It reads the tag and
 // length prefix first, then reads exactly the number of value bytes indicated.
@@ -144,13 +149,17 @@ func nlaFailure(kind core.RDPErrorKind, message string, err error) error {
 	return &core.RDPError{Kind: kind, Message: message, Wrapped: err}
 }
 
+// credSSPStatus maps a CredSSP TSRequest errorCode to a typed error. Known
+// credential-rejection statuses are authentication failures; anything else
+// stays a protocol error so the caller never miscounts it.
 func credSSPStatus(code int64) error {
 	if code == 0 {
 		return nil
 	}
 	kind := core.ErrKindProtocol
 	switch code {
-	case 0xc0000064, // STATUS_NO_SUCH_USER
+	case 0xc0000022, // STATUS_ACCESS_DENIED
+		0xc0000064, // STATUS_NO_SUCH_USER
 		0xc000006a, // STATUS_WRONG_PASSWORD
 		0xc000006d, // STATUS_LOGON_FAILURE
 		0xc000006e, // STATUS_ACCOUNT_RESTRICTION
@@ -167,6 +176,24 @@ func credSSPStatus(code int64) error {
 	return nlaFailure(kind, fmt.Sprintf("CredSSP server returned NTSTATUS 0x%08x", code), nil)
 }
 
+// generateNonce creates a 32-byte cryptographically random nonce for CredSSP v5+.
+func generateNonce() ([]byte, error) {
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("generate nonce: %w", err)
+	}
+	return nonce, nil
+}
+
+// computeHash computes SHA256(magic || nonce || pubkey) as required by CredSSP v5+.
+func computeHash(magic string, nonce, pubkey []byte) []byte {
+	h := sha256.New()
+	h.Write([]byte(magic))
+	h.Write(nonce)
+	h.Write(pubkey)
+	return h.Sum(nil)
+}
+
 func (t *TPKT) StartNLA() error {
 	if err := t.ctx.Err(); err != nil {
 		return nlaFailure(core.ErrKindTimeout, "NLA context ended", err)
@@ -176,7 +203,18 @@ func (t *TPKT) StartNLA() error {
 		glog.Info("start tls failed", err)
 		return nlaFailure(core.ErrKindTLS, "NLA TLS handshake failed", err)
 	}
-	req := nla.EncodeDERTRequest([]nla.Message{t.ntlm.GetNegotiateMessage()}, nil, nil)
+
+	// Generate nonce for v5+ pubkey hash computation. We generate it up front
+	// and reuse the same nonce for the entire exchange.
+	nonce, err := generateNonce()
+	if err != nil {
+		return err
+	}
+
+	// Send NegotiateMessage advertising our highest CredSSP version.
+	// Include the nonce from the first message (as FreeRDP does).
+	req := nla.EncodeDERTRequest(clientVersion,
+		[]nla.Message{t.ntlm.GetNegotiateMessage()}, nil, nil, nonce)
 	if err := t.ctx.Err(); err != nil {
 		return nlaFailure(core.ErrKindTimeout, "NLA context ended", err)
 	}
@@ -194,10 +232,10 @@ func (t *TPKT) StartNLA() error {
 		return nlaFailure(core.ErrKindNetwork, "read NLA challenge", err)
 	}
 	glog.Debug("StartNLA Read success")
-	return t.recvChallenge(resp)
+	return t.recvChallenge(resp, nonce)
 }
 
-func (t *TPKT) recvChallenge(data []byte) error {
+func (t *TPKT) recvChallenge(data []byte, nonce []byte) error {
 	if err := t.ctx.Err(); err != nil {
 		return nlaFailure(core.ErrKindTimeout, "NLA context ended", err)
 	}
@@ -211,9 +249,19 @@ func (t *TPKT) recvChallenge(data []byte) error {
 	if err := credSSPStatus(tsreq.ErrorCode); err != nil {
 		return err
 	}
-	if len(tsreq.NegoTokens) != 1 {
-		return nlaFailure(core.ErrKindProtocol, "expected one NTLM challenge token", nil)
+
+	if len(tsreq.NegoTokens) == 0 {
+		return nlaFailure(core.ErrKindProtocol, fmt.Sprintf("no NegoTokens in response (server version %d)", tsreq.Version), nil)
 	}
+
+	// Negotiate effective CredSSP version: min(ours, server's)
+	effectiveVersion := tsreq.Version
+	if clientVersion < effectiveVersion {
+		effectiveVersion = clientVersion
+	}
+	glog.Debugf("CredSSP version negotiation: client=%d server=%d effective=%d",
+		clientVersion, tsreq.Version, effectiveVersion)
+
 	authMsg, ntlmSec := t.ntlm.GetAuthenticateMessage(tsreq.NegoTokens[0].Data)
 	if authMsg == nil || ntlmSec == nil {
 		return nlaFailure(core.ErrKindProtocol, "invalid NTLM challenge", nil)
@@ -223,12 +271,25 @@ func (t *TPKT) recvChallenge(data []byte) error {
 		return nlaFailure(core.ErrKindTLS, "read TLS server public key", err)
 	}
 	t.ntlmSec = ntlmSec
-	encryptPubkey := ntlmSec.GssEncrypt(pubkey)
-	req := nla.EncodeDERTRequest([]nla.Message{authMsg}, nil, encryptPubkey)
+
+	var reqBytes []byte
+	if effectiveVersion >= 5 {
+		// v5+: send SHA-256 hash of (magic || nonce || pubkey) instead of raw pubkey
+		hash := computeHash("CredSSP Client-To-Server Binding Hash\x00", nonce, pubkey)
+		encryptedHash := ntlmSec.GssEncrypt(hash)
+		reqBytes = nla.EncodeDERTRequest(effectiveVersion,
+			[]nla.Message{authMsg}, nil, encryptedHash, nonce)
+	} else {
+		// v2-v4: send encrypted raw public key
+		encryptPubkey := ntlmSec.GssEncrypt(pubkey)
+		reqBytes = nla.EncodeDERTRequest(effectiveVersion,
+			[]nla.Message{authMsg}, nil, encryptPubkey, nil)
+	}
+
 	if err := t.ctx.Err(); err != nil {
 		return nlaFailure(core.ErrKindTimeout, "NLA context ended", err)
 	}
-	_, err = t.Conn.Write(req)
+	_, err = t.Conn.Write(reqBytes)
 	if err != nil {
 		glog.Info("send AuthenticateMessage", err)
 		return nlaFailure(core.ErrKindNetwork, "send NLA authenticate message", err)
@@ -242,10 +303,10 @@ func (t *TPKT) recvChallenge(data []byte) error {
 		return nlaFailure(core.ErrKindNetwork, "read NLA pubkey response", err)
 	}
 	glog.Debug("recvChallenge Read success")
-	return t.recvPubKeyInc(resp)
+	return t.recvPubKeyInc(resp, effectiveVersion, nonce, pubkey)
 }
 
-func (t *TPKT) recvPubKeyInc(data []byte) error {
+func (t *TPKT) recvPubKeyInc(data []byte, effectiveVersion int, nonce, pubkey []byte) error {
 	if err := t.ctx.Err(); err != nil {
 		return nlaFailure(core.ErrKindTimeout, "NLA context ended", err)
 	}
@@ -265,28 +326,43 @@ func (t *TPKT) recvPubKeyInc(data []byte) error {
 
 	if t.VerifyServer && len(tsreq.PubKeyAuth) > 0 {
 		serverPubKey := t.ntlmSec.GssDecrypt([]byte(tsreq.PubKeyAuth))
-		origPubKey, pkErr := t.Conn.TlsPubKey()
-		if pkErr != nil {
-			return nlaFailure(core.ErrKindTLS, "read TLS server public key", pkErr)
-		}
-		// Server should return the public key with first byte incremented by 1
-		expected := make([]byte, len(origPubKey))
-		copy(expected, origPubKey)
-		if len(expected) > 0 {
-			expected[0]++
-		}
-		if len(serverPubKey) != len(expected) {
-			return nlaFailure(core.ErrKindProtocol, "server PubKeyAuth verification failed: length mismatch", nil)
-		}
-		match := true
-		for i := range serverPubKey {
-			if serverPubKey[i] != expected[i] {
-				match = false
-				break
+
+		if effectiveVersion >= 5 {
+			// v5+: verify SHA-256 hash
+			expected := computeHash("CredSSP Server-To-Client Binding Hash\x00", nonce, pubkey)
+			if len(serverPubKey) != len(expected) {
+				return nlaFailure(core.ErrKindProtocol, "server PubKeyAuth verification failed: length mismatch", nil)
 			}
-		}
-		if !match {
-			return nlaFailure(core.ErrKindProtocol, "server PubKeyAuth verification failed: possible MITM", nil)
+			match := true
+			for i := range serverPubKey {
+				if serverPubKey[i] != expected[i] {
+					match = false
+					break
+				}
+			}
+			if !match {
+				return nlaFailure(core.ErrKindProtocol, "server PubKeyAuth verification failed: possible MITM", nil)
+			}
+		} else {
+			// v2-v4: server returns pubkey with first byte incremented by 1
+			expected := make([]byte, len(pubkey))
+			copy(expected, pubkey)
+			if len(expected) > 0 {
+				expected[0]++
+			}
+			if len(serverPubKey) != len(expected) {
+				return nlaFailure(core.ErrKindProtocol, "server PubKeyAuth verification failed: length mismatch", nil)
+			}
+			match := true
+			for i := range serverPubKey {
+				if serverPubKey[i] != expected[i] {
+					match = false
+					break
+				}
+			}
+			if !match {
+				return nlaFailure(core.ErrKindProtocol, "server PubKeyAuth verification failed: possible MITM", nil)
+			}
 		}
 		glog.Debug("Server PubKeyAuth verified successfully")
 	}
@@ -294,7 +370,7 @@ func (t *TPKT) recvPubKeyInc(data []byte) error {
 	domain, username, password := t.ntlm.GetEncodedCredentials()
 	credentials := nla.EncodeDERTCredentials(domain, username, password)
 	authInfo := t.ntlmSec.GssEncrypt(credentials)
-	req := nla.EncodeDERTRequest(nil, authInfo, nil)
+	req := nla.EncodeDERTRequest(effectiveVersion, nil, authInfo, nil, nil)
 	_, err = t.Conn.Write(req)
 	if err != nil {
 		glog.Info("send AuthenticateMessage", err)

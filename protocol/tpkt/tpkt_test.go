@@ -1,7 +1,11 @@
 package tpkt
 
 import (
+	stderrors "errors"
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,5 +182,94 @@ func TestMalformedExtendedFastPathLengthNoPanic(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("no error event surfaced from the malformed frame")
+	}
+}
+
+func TestComputeHash(t *testing.T) {
+	magic := "CredSSP Client-To-Server Binding Hash\x00"
+	nonce := make([]byte, 32)
+	for i := range nonce {
+		nonce[i] = byte(i)
+	}
+	pubkey := []byte("test-public-key-data")
+
+	got := computeHash(magic, nonce, pubkey)
+
+	// Verify against manual SHA-256 computation
+	h := sha256.New()
+	h.Write([]byte(magic))
+	h.Write(nonce)
+	h.Write(pubkey)
+	want := h.Sum(nil)
+
+	if hex.EncodeToString(got) != hex.EncodeToString(want) {
+		t.Errorf("computeHash mismatch:\n  got  %s\n  want %s",
+			hex.EncodeToString(got), hex.EncodeToString(want))
+	}
+
+	if len(got) != 32 {
+		t.Errorf("hash length: got %d, want 32", len(got))
+	}
+}
+
+func TestComputeHash_DifferentMagicProducesDifferentHash(t *testing.T) {
+	nonce := make([]byte, 32)
+	pubkey := []byte("key")
+
+	clientHash := computeHash("CredSSP Client-To-Server Binding Hash\x00", nonce, pubkey)
+	serverHash := computeHash("CredSSP Server-To-Client Binding Hash\x00", nonce, pubkey)
+
+	if hex.EncodeToString(clientHash) == hex.EncodeToString(serverHash) {
+		t.Error("client and server hashes should differ")
+	}
+}
+
+func TestCredSSPStatusZero(t *testing.T) {
+	if err := credSSPStatus(0); err != nil {
+		t.Errorf("expected nil, got: %v", err)
+	}
+}
+
+func TestCredSSPStatusKnownCodes(t *testing.T) {
+	for _, code := range []int64{
+		0xc0000022, // STATUS_ACCESS_DENIED
+		0xc000006d, // STATUS_LOGON_FAILURE
+		0xc000006e, // STATUS_ACCOUNT_RESTRICTION
+		0xc0000064, // STATUS_NO_SUCH_USER
+		0xc0000234, // STATUS_ACCOUNT_LOCKED_OUT
+	} {
+		err := credSSPStatus(code)
+		if err == nil {
+			t.Errorf("code 0x%X: expected error, got nil", code)
+			continue
+		}
+		var rdpErr *core.RDPError
+		if !stderrors.As(err, &rdpErr) {
+			t.Errorf("code 0x%X: expected *core.RDPError, got %T", code, err)
+			continue
+		}
+		if rdpErr.Kind != core.ErrKindAuth {
+			t.Errorf("code 0x%X: expected ErrKindAuth, got %v", code, rdpErr.Kind)
+		}
+		if !strings.Contains(err.Error(), "NTSTATUS") {
+			t.Errorf("code 0x%X: error %q should contain NTSTATUS", code, err.Error())
+		}
+	}
+}
+
+func TestCredSSPStatusUnknownCode(t *testing.T) {
+	err := credSSPStatus(0x12345)
+	if err == nil {
+		t.Fatal("expected error for non-zero code")
+	}
+	var rdpErr *core.RDPError
+	if !stderrors.As(err, &rdpErr) {
+		t.Fatalf("expected *core.RDPError, got %T", err)
+	}
+	if rdpErr.Kind != core.ErrKindProtocol {
+		t.Errorf("unknown NTSTATUS must stay a protocol failure, got %v", rdpErr.Kind)
+	}
+	if !strings.Contains(err.Error(), "0x00012345") {
+		t.Errorf("error %q should contain hex code", err.Error())
 	}
 }

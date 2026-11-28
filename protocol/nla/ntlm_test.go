@@ -158,7 +158,26 @@ func TestGetAuthenticateMessageValidOptionalVersion(t *testing.T) {
 					t.Fatal("negotiated flags changed")
 				}
 				nt, lm := field(20), field(12)
-				if len(nt) != 48+len(info) || len(lm) != 24 || !bytes.Equal(nt[16:24], []byte{1, 1, 0, 0, 0, 0, 0, 0}) || !bytes.Equal(nt[44:len(nt)-4], info) {
+				// With a server timestamp the client computes a MIC, which
+				// (per MS-NLMP 3.1.5.1.2) inserts MsvAvFlags (MIC_PROVIDED)
+				// and MsvAvTargetName (TERMSRV/<server>) before MsvAvEOL.
+				expectedInfo := info
+				if timestamp {
+					spn := []byte("TERMSRV/Domain")
+					spnU := make([]byte, 2*len(spn))
+					for i, c := range spn {
+						spnU[2*i] = c
+					}
+					expectedInfo = append([]byte(nil), info[:len(info)-4]...)
+					expectedInfo = binary.LittleEndian.AppendUint16(expectedInfo, 6)  // MsvAvFlags
+					expectedInfo = binary.LittleEndian.AppendUint16(expectedInfo, 4)
+					expectedInfo = binary.LittleEndian.AppendUint32(expectedInfo, 2)   // MIC_PROVIDED
+					expectedInfo = binary.LittleEndian.AppendUint16(expectedInfo, 9)   // MsvAvTargetName
+					expectedInfo = binary.LittleEndian.AppendUint16(expectedInfo, uint16(len(spnU)))
+					expectedInfo = append(expectedInfo, spnU...)
+					expectedInfo = append(expectedInfo, 0, 0, 0, 0)                    // MsvAvEOL
+				}
+				if len(nt) != 48+len(expectedInfo) || len(lm) != 24 || !bytes.Equal(nt[16:24], []byte{1, 1, 0, 0, 0, 0, 0, 0}) || !bytes.Equal(nt[44:len(nt)-4], expectedInfo) {
 					t.Fatal("wrong NTLMv2 response layout/target info")
 				}
 				if !bytes.Equal(lm[16:24], nt[32:40]) {

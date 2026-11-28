@@ -2,10 +2,13 @@ package core
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net"
 	"sync/atomic"
 	"time"
@@ -34,9 +37,9 @@ func NewSocketLayer(conn net.Conn) *SocketLayer {
 func (s *SocketLayer) SetContext(ctx context.Context) {
 	s.ctx = ctx
 	if deadline, ok := ctx.Deadline(); ok {
-		s.conn.SetDeadline(deadline)
+		_ = s.conn.SetDeadline(deadline)
 		if tlsConn := s.tlsConn.Load(); tlsConn != nil {
-			tlsConn.SetDeadline(deadline)
+			_ = tlsConn.SetDeadline(deadline)
 		}
 	}
 }
@@ -75,10 +78,13 @@ func (s *SocketLayer) StartTLS() error {
 	if minVer == 0 {
 		minVer = tls.VersionTLS12
 	}
+	// Cap at TLS 1.2: Windows CredSSP silently fails over TLS 1.3
+	// (the server accepts the handshake but drops the pubKeyAuth verification).
+	// FreeRDP also limits to TLS 1.2 for RDP connections.
 	config := &tls.Config{
 		InsecureSkipVerify: !s.TLSVerify,
 		MinVersion:         minVer,
-		MaxVersion:         tls.VersionTLS13,
+		MaxVersion:         tls.VersionTLS12,
 	}
 	tlsConn := tls.Client(s.conn, config)
 	s.tlsConn.Store(tlsConn)
@@ -87,19 +93,36 @@ func (s *SocketLayer) StartTLS() error {
 		return err
 	}
 	if deadline, ok := s.ctx.Deadline(); ok {
-		tlsConn.SetDeadline(deadline)
+		_ = tlsConn.SetDeadline(deadline)
 	}
 	return nil
 }
 
+// TlsPubKey extracts the server's public key in its type-specific DER encoding.
+// For RSA this is PKCS#1, for ECDSA the uncompressed EC point, for Ed25519 the
+// raw 32-byte key. This matches what Microsoft SChannel and FreeRDP use for the
+// CredSSP public key hash computation.
 func (s *SocketLayer) TlsPubKey() ([]byte, error) {
 	tlsConn := s.tlsConn.Load()
 	if tlsConn == nil {
 		return nil, errors.New("TLS conn does not exist")
 	}
-	pub, ok := tlsConn.ConnectionState().PeerCertificates[0].PublicKey.(*rsa.PublicKey)
-	if !ok {
-		return nil, errors.New("server certificate does not contain RSA public key")
+	certs := tlsConn.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return nil, errors.New("no peer certificates")
 	}
-	return x509.MarshalPKCS1PublicKey(pub), nil
+	switch pub := certs[0].PublicKey.(type) {
+	case *rsa.PublicKey:
+		return x509.MarshalPKCS1PublicKey(pub), nil
+	case *ecdsa.PublicKey:
+		ecdhKey, err := pub.ECDH()
+		if err != nil {
+			return nil, fmt.Errorf("ECDSA to ECDH conversion: %w", err)
+		}
+		return ecdhKey.Bytes(), nil
+	case ed25519.PublicKey:
+		return []byte(pub), nil
+	default:
+		return nil, fmt.Errorf("unsupported public key type: %T", pub)
+	}
 }
