@@ -245,8 +245,9 @@ func (x *X224) Connect(ctx ...context.Context) error {
 	message.ProtocolNeg.Result = uint32(x.requestedProtocol)
 
 	glog.Debug("x224 sendConnectionRequest", hex.EncodeToString(message.Serialize()))
-	_, err := x.transport.Write(message.Serialize())
+	// A fast peer can answer while Write is still returning.
 	x.transport.Once("data", x.recvConnectionConfirm)
+	_, err := x.transport.Write(message.Serialize())
 	return err
 }
 
@@ -318,7 +319,7 @@ func (x *X224) recvConnectionConfirm(s []byte) {
 		err := x.transport.(*tpkt.TPKT).StartNLA()
 		if err != nil {
 			glog.Error("start NLA failed:", err)
-			x.Emit("error", &core.RDPError{Kind: core.ErrKindAuth, Message: "NLA authentication failed", Wrapped: err})
+			x.Emit("error", err)
 			x.Close()
 			return
 		}

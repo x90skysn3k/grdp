@@ -7,12 +7,14 @@ import (
 	"crypto/x509"
 	"errors"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
 type SocketLayer struct {
-	conn          net.Conn
-	tlsConn       *tls.Conn
+	conn net.Conn
+	// Publish TLS only after construction; Close may race a timed-out handshake.
+	tlsConn       atomic.Pointer[tls.Conn]
 	ctx           context.Context
 	TLSMinVersion uint16
 	TLSVerify     bool
@@ -21,7 +23,6 @@ type SocketLayer struct {
 func NewSocketLayer(conn net.Conn) *SocketLayer {
 	l := &SocketLayer{
 		conn:          conn,
-		tlsConn:       nil,
 		ctx:           context.Background(),
 		TLSMinVersion: tls.VersionTLS12,
 	}
@@ -34,8 +35,8 @@ func (s *SocketLayer) SetContext(ctx context.Context) {
 	s.ctx = ctx
 	if deadline, ok := ctx.Deadline(); ok {
 		s.conn.SetDeadline(deadline)
-		if s.tlsConn != nil {
-			s.tlsConn.SetDeadline(deadline)
+		if tlsConn := s.tlsConn.Load(); tlsConn != nil {
+			tlsConn.SetDeadline(deadline)
 		}
 	}
 }
@@ -46,22 +47,22 @@ func (s *SocketLayer) SetDeadline(t time.Time) error {
 }
 
 func (s *SocketLayer) Read(b []byte) (n int, err error) {
-	if s.tlsConn != nil {
-		return s.tlsConn.Read(b)
+	if tlsConn := s.tlsConn.Load(); tlsConn != nil {
+		return tlsConn.Read(b)
 	}
 	return s.conn.Read(b)
 }
 
 func (s *SocketLayer) Write(b []byte) (n int, err error) {
-	if s.tlsConn != nil {
-		return s.tlsConn.Write(b)
+	if tlsConn := s.tlsConn.Load(); tlsConn != nil {
+		return tlsConn.Write(b)
 	}
 	return s.conn.Write(b)
 }
 
 func (s *SocketLayer) Close() error {
-	if s.tlsConn != nil {
-		err := s.tlsConn.Close()
+	if tlsConn := s.tlsConn.Load(); tlsConn != nil {
+		err := tlsConn.Close()
 		if err != nil {
 			return err
 		}
@@ -79,22 +80,24 @@ func (s *SocketLayer) StartTLS() error {
 		MinVersion:         minVer,
 		MaxVersion:         tls.VersionTLS13,
 	}
-	s.tlsConn = tls.Client(s.conn, config)
-	err := s.tlsConn.Handshake()
+	tlsConn := tls.Client(s.conn, config)
+	s.tlsConn.Store(tlsConn)
+	err := tlsConn.Handshake()
 	if err != nil {
 		return err
 	}
 	if deadline, ok := s.ctx.Deadline(); ok {
-		s.tlsConn.SetDeadline(deadline)
+		tlsConn.SetDeadline(deadline)
 	}
 	return nil
 }
 
 func (s *SocketLayer) TlsPubKey() ([]byte, error) {
-	if s.tlsConn == nil {
+	tlsConn := s.tlsConn.Load()
+	if tlsConn == nil {
 		return nil, errors.New("TLS conn does not exist")
 	}
-	pub, ok := s.tlsConn.ConnectionState().PeerCertificates[0].PublicKey.(*rsa.PublicKey)
+	pub, ok := tlsConn.ConnectionState().PeerCertificates[0].PublicKey.(*rsa.PublicKey)
 	if !ok {
 		return nil, errors.New("server certificate does not contain RSA public key")
 	}

@@ -6,6 +6,7 @@ import (
 	"crypto/rc4"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"time"
 
 	"github.com/lunixbochs/struc"
@@ -153,41 +154,122 @@ func NewChallengeMessage() *ChallengeMessage {
 	}
 }
 
-// total len - payload len
+// BaseLen returns the fixed header size, including the optional VERSION field.
 func (m *ChallengeMessage) BaseLen() uint32 {
-	return 56
+	if m.NegotiateFlags&NTLMSSP_NEGOTIATE_VERSION != 0 {
+		return 56
+	}
+	return 48
 }
 
 func (m *ChallengeMessage) getTargetInfo() []byte {
 	if m.TargetInfoLen == 0 {
-		return make([]byte, 0)
+		return nil
 	}
-	offset := m.BaseLen()
-	start := m.TargetInfoBufferOffset - offset
-	return m.Payload[start : start+uint32(m.TargetInfoLen)]
+	start := uint64(m.TargetInfoBufferOffset) - uint64(m.BaseLen())
+	return m.Payload[start : start+uint64(m.TargetInfoLen)]
 }
 func (m *ChallengeMessage) getTargetName() []byte {
 	if m.TargetNameLen == 0 {
-		return make([]byte, 0)
+		return nil
 	}
-	offset := m.BaseLen()
-	start := m.TargetNameBufferOffset - offset
-	return m.Payload[start : start+uint32(m.TargetNameLen)]
+	start := uint64(m.TargetNameBufferOffset) - uint64(m.BaseLen())
+	return m.Payload[start : start+uint64(m.TargetNameLen)]
 }
-func (m *ChallengeMessage) getTargetInfoTimestamp(data []byte) []byte {
-	r := bytes.NewReader(data)
-	for r.Len() > 0 {
-		avPair := &AVPair{}
-		struc.Unpack(r, avPair)
-		if avPair.Id == MsvAvTimestamp {
-			return avPair.Value
-		}
 
-		if avPair.Id == MsvAvEOL {
-			break
+// parseChallenge validates wire offsets before any unsigned subtraction or slice.
+func parseChallenge(data []byte) (*ChallengeMessage, error) {
+	if len(data) < 48 {
+		return nil, fmt.Errorf("NTLM challenge header truncated")
+	}
+	if string(data[:8]) != "NTLMSSP\x00" || binary.LittleEndian.Uint32(data[8:12]) != 2 {
+		return nil, fmt.Errorf("invalid NTLM challenge signature or message type")
+	}
+	m := &ChallengeMessage{}
+	r := bytes.NewReader(data)
+	if err := struc.Unpack(r, m); err != nil {
+		return nil, fmt.Errorf("decode NTLM challenge: %w", err)
+	}
+	header := m.BaseLen()
+	if uint64(len(data)) < uint64(header) {
+		return nil, fmt.Errorf("NTLM challenge version truncated")
+	}
+	if m.NegotiateFlags&NTLMSSP_NEGOTIATE_VERSION != 0 {
+		if err := struc.Unpack(r, &m.Version); err != nil {
+			return nil, fmt.Errorf("decode NTLM challenge version: %w", err)
 		}
 	}
-	return nil
+	for _, field := range []struct {
+		length uint16
+		offset uint32
+	}{
+		{m.TargetNameLen, m.TargetNameBufferOffset},
+		{m.TargetInfoLen, m.TargetInfoBufferOffset},
+	} {
+		// MS-NLMP: offsets and MaxLen are ignored for an empty buffer.
+		if field.length == 0 {
+			continue
+		}
+		if field.offset < header || uint64(field.offset)+uint64(field.length) > uint64(len(data)) {
+			return nil, fmt.Errorf("NTLM challenge security buffer outside payload")
+		}
+	}
+	if m.NegotiateFlags&NTLMSSP_NEGOTIATE_UNICODE != 0 && m.TargetNameLen%2 != 0 {
+		return nil, fmt.Errorf("invalid NTLM Unicode target name length")
+	}
+	m.Payload = data[header:]
+	return m, nil
+}
+
+// TargetInfo is a bounded AV_PAIR list, terminated by a zero-length MsvAvEOL.
+// Decode lengths directly rather than letting struc allocate from untrusted input.
+func (m *ChallengeMessage) getTargetInfoTimestamp(data []byte) ([]byte, error) {
+	var timestamp []byte
+	if len(data) == 0 {
+		return nil, nil
+	}
+	for len(data) > 0 {
+		if len(data) < 4 {
+			return nil, fmt.Errorf("NTLM target info AV header truncated")
+		}
+		id := binary.LittleEndian.Uint16(data[:2])
+		length := int(binary.LittleEndian.Uint16(data[2:4]))
+		data = data[4:]
+		if length > len(data) {
+			return nil, fmt.Errorf("NTLM target info AV value truncated")
+		}
+		switch id {
+		case MsvAvEOL:
+			if length != 0 || len(data) != 0 {
+				return nil, fmt.Errorf("invalid NTLM target info terminator")
+			}
+			return timestamp, nil
+		case MsvAvTimestamp:
+			if length != 8 {
+				return nil, fmt.Errorf("invalid NTLM timestamp length")
+			}
+			timestamp = data[:length]
+		case MsvAvFlags:
+			if length != 4 {
+				return nil, fmt.Errorf("invalid NTLM AV flags length")
+			}
+		case MsvAvSingleHost:
+			if length != 48 {
+				return nil, fmt.Errorf("invalid NTLM single-host length")
+			}
+		case MsvChannelBindings:
+			if length != 16 {
+				return nil, fmt.Errorf("invalid NTLM channel bindings length")
+			}
+		case MsvAvNbComputerName, MsvAvNbDomainName, MsvAvDnsComputerName,
+			MsvAvDnsDomainName, MsvAvDnsTreeName, MsvAvTargetName:
+			if length%2 != 0 {
+				return nil, fmt.Errorf("invalid NTLM Unicode AV length")
+			}
+		}
+		data = data[length:]
+	}
+	return nil, fmt.Errorf("NTLM target info missing terminator")
 }
 
 type AuthenticateMessage struct {
@@ -313,7 +395,7 @@ func (n *NTLMv2) GetNegotiateMessage() *NegotiateMessage {
 	return n.negotiateMessage
 }
 
-//  process NTLMv2 Authenticate hash
+// process NTLMv2 Authenticate hash
 func (n *NTLMv2) ComputeResponseV2(respKeyNT, respKeyLM, serverChallenge, clientChallenge,
 	timestamp, serverInfo []byte) (ntChallResp, lmChallResp, SessBaseKey []byte) {
 
@@ -362,30 +444,23 @@ var (
 	serverSealing = concat([]byte("session key to server-to-client sealing key magic constant"), []byte{0x00})
 )
 
+// GetAuthenticateMessage returns nil, nil for an invalid server challenge.
 func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2Security) {
-	challengeMsg := &ChallengeMessage{}
-	r := bytes.NewReader(s)
-	err := struc.Unpack(r, challengeMsg)
+	challengeMsg, err := parseChallenge(s)
 	if err != nil {
 		glog.Error("read challengeMsg", err)
 		return nil, nil
 	}
-	if challengeMsg.NegotiateFlags&NTLMSSP_NEGOTIATE_VERSION != 0 {
-		version := NVersion{}
-		err := struc.Unpack(r, &version)
-		if err != nil {
-			glog.Error("read version", err)
-			return nil, nil
-		}
-		challengeMsg.Version = version
-	}
-	challengeMsg.Payload, _ = core.ReadBytes(r.Len(), r)
 	n.challengeMessage = challengeMsg
 	glog.Debugf("challengeMsg:%+v", challengeMsg)
 
 	serverName := challengeMsg.getTargetName()
 	serverInfo := challengeMsg.getTargetInfo()
-	timestamp := challengeMsg.getTargetInfoTimestamp(serverInfo)
+	timestamp, err := challengeMsg.getTargetInfoTimestamp(serverInfo)
+	if err != nil {
+		glog.Error("read target info", err)
+		return nil, nil
+	}
 	computeMIC := false
 	if timestamp == nil {
 		ft := uint64(time.Now().UnixNano()) / 100
@@ -417,6 +492,9 @@ func (n *NTLMv2) GetAuthenticateMessage(s []byte) (*AuthenticateMessage, *NTLMv2
 		domain, user, []byte(""), lmChallengeResponse, ntChallengeResponse, EncryptedRandomSessionKey)
 
 	if computeMIC {
+		if n.negotiateMessage == nil {
+			n.GetNegotiateMessage()
+		}
 		copy(n.authenticateMessage.MIC[:], MIC(exportedSessionKey, n.negotiateMessage, n.challengeMessage, n.authenticateMessage)[:16])
 	}
 
