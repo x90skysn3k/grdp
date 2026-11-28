@@ -2,6 +2,7 @@ package nla
 
 import (
 	"encoding/asn1"
+	"fmt"
 
 	"github.com/x90skysn3k/grdp/glog"
 )
@@ -15,7 +16,7 @@ type TSRequest struct {
 	NegoTokens  []NegoToken `asn1:"optional,explicit,tag:1"`
 	AuthInfo    []byte      `asn1:"optional,explicit,tag:2"`
 	PubKeyAuth  []byte      `asn1:"optional,explicit,tag:3"`
-	ErrorCode   int         `asn1:"optional,explicit,tag:4"`
+	ErrorCode   int64       `asn1:"optional,explicit,tag:4"`
 	ClientNonce []byte      `asn1:"optional,explicit,tag:5"`
 }
 
@@ -80,8 +81,17 @@ func EncodeDERTRequest(version int, msgs []Message, authInfo, pubKeyAuth, client
 
 func DecodeDERTRequest(s []byte) (*TSRequest, error) {
 	treq := &TSRequest{}
-	_, err := asn1.Unmarshal(s, treq)
-	return treq, err
+	rest, err := asn1.Unmarshal(s, treq)
+	if err != nil {
+		return nil, err
+	}
+	if len(rest) != 0 {
+		return nil, fmt.Errorf("trailing data after CredSSP TSRequest")
+	}
+	if treq.ErrorCode < 0 || treq.ErrorCode > 0xffffffff {
+		return nil, fmt.Errorf("invalid CredSSP NTSTATUS")
+	}
+	return treq, nil
 }
 func EncodeDERTCredentials(domain, username, password []byte) []byte {
 	tpas := TSPasswordCreds{domain, username, password}

@@ -1,6 +1,7 @@
 package tpkt
 
 import (
+	stderrors "errors"
 	"crypto/sha256"
 	"encoding/hex"
 	"net"
@@ -223,45 +224,50 @@ func TestComputeHash_DifferentMagicProducesDifferentHash(t *testing.T) {
 	}
 }
 
-func TestCheckErrorCode_Zero(t *testing.T) {
-	tsreq := &nla.TSRequest{Version: 6, ErrorCode: 0}
-	if err := checkErrorCode(tsreq); err != nil {
+func TestCredSSPStatusZero(t *testing.T) {
+	if err := credSSPStatus(0); err != nil {
 		t.Errorf("expected nil, got: %v", err)
 	}
 }
 
-func TestCheckErrorCode_KnownCodes(t *testing.T) {
-	tests := []struct {
-		code     int
-		contains string
-	}{
-		{-1073741790, "STATUS_ACCESS_DENIED"},       // 0xC0000022 as signed
-		{-1073741715, "STATUS_LOGON_FAILURE"},       // 0xC000006D as signed
-		{-1073741714, "STATUS_ACCOUNT_RESTRICTION"}, // 0xC000006E as signed
-		{-2146892986, "SEC_E_DELEGATION_POLICY"},    // 0x80090346 as signed
-	}
-
-	for _, tt := range tests {
-		tsreq := &nla.TSRequest{Version: 6, ErrorCode: tt.code}
-		err := checkErrorCode(tsreq)
+func TestCredSSPStatusKnownCodes(t *testing.T) {
+	for _, code := range []int64{
+		0xc0000022, // STATUS_ACCESS_DENIED
+		0xc000006d, // STATUS_LOGON_FAILURE
+		0xc000006e, // STATUS_ACCOUNT_RESTRICTION
+		0xc0000064, // STATUS_NO_SUCH_USER
+		0xc0000234, // STATUS_ACCOUNT_LOCKED_OUT
+	} {
+		err := credSSPStatus(code)
 		if err == nil {
-			t.Errorf("code 0x%X: expected error, got nil", tt.code)
+			t.Errorf("code 0x%X: expected error, got nil", code)
 			continue
 		}
-		if !strings.Contains(err.Error(), tt.contains) {
-			t.Errorf("code 0x%X: error %q should contain %q", tt.code, err.Error(), tt.contains)
+		var rdpErr *core.RDPError
+		if !stderrors.As(err, &rdpErr) {
+			t.Errorf("code 0x%X: expected *core.RDPError, got %T", code, err)
+			continue
+		}
+		if rdpErr.Kind != core.ErrKindAuth {
+			t.Errorf("code 0x%X: expected ErrKindAuth, got %v", code, rdpErr.Kind)
 		}
 		if !strings.Contains(err.Error(), "NTSTATUS") {
-			t.Errorf("code 0x%X: error %q should contain NTSTATUS", tt.code, err.Error())
+			t.Errorf("code 0x%X: error %q should contain NTSTATUS", code, err.Error())
 		}
 	}
 }
 
-func TestCheckErrorCode_UnknownCode(t *testing.T) {
-	tsreq := &nla.TSRequest{Version: 6, ErrorCode: 0x12345}
-	err := checkErrorCode(tsreq)
+func TestCredSSPStatusUnknownCode(t *testing.T) {
+	err := credSSPStatus(0x12345)
 	if err == nil {
 		t.Fatal("expected error for non-zero code")
+	}
+	var rdpErr *core.RDPError
+	if !stderrors.As(err, &rdpErr) {
+		t.Fatalf("expected *core.RDPError, got %T", err)
+	}
+	if rdpErr.Kind != core.ErrKindProtocol {
+		t.Errorf("unknown NTSTATUS must stay a protocol failure, got %v", rdpErr.Kind)
 	}
 	if !strings.Contains(err.Error(), "0x00012345") {
 		t.Errorf("error %q should contain hex code", err.Error())

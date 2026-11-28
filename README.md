@@ -10,8 +10,9 @@ Originally forked from [icodeface/grdp](https://github.com/icodeface/grdp).
 - **SSL/TLS authentication** - Standard RDP over TLS
 - **Standard RDP authentication** - Legacy RDP security
 - **context.Context support** - Deadlines and cancellation propagate through the entire protocol stack
-- **Goroutine-safe shutdown** - Clean emitter teardown prevents goroutine leaks
+- **Goroutine-safe shutdown** - Clean emitter teardown prevents goroutine leaks; synchronized TLS handoff permits socket closure during handshake startup
 - **Timeout-aware NLA handshake** - All blocking I/O respects context deadlines
+- **Validated NLA input** - Malformed NTLM/CredSSP messages return protocol errors rather than panicking; only explicit credential-rejection statuses return authentication errors
 
 ## Installation
 

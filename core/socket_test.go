@@ -71,8 +71,9 @@ func tlsPubKeyFromCert(t *testing.T, cert tls.Certificate) []byte {
 	defer conn.Close() //nolint:errcheck
 
 	sock := NewSocketLayer(conn)
-	sock.tlsConn = tls.Client(conn, clientConf)
-	if err := sock.tlsConn.Handshake(); err != nil {
+	clientTLS := tls.Client(conn, clientConf)
+	sock.tlsConn.Store(clientTLS)
+	if err := clientTLS.Handshake(); err != nil {
 		t.Fatal("client handshake:", err)
 	}
 
